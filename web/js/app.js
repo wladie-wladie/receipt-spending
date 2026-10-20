@@ -1,5 +1,5 @@
 import * as store from "./db.js";
-import { CATS, MODELS, checkKey, recognizeWithClaude, recognizeFree } from "./recognize.js";
+import { CATS, MODELS, checkKey, recognizeWithClaude, recognizeFree, unitPrice } from "./recognize.js";
 import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion } from "./native.js";
 
 const MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
@@ -23,6 +23,21 @@ const LS = {
   set(k, v) { try { if (v == null) localStorage.removeItem("rs." + k); else localStorage.setItem("rs." + k, v); } catch (_) {} },
 };
 const apiKey = () => LS.get("apiKey", "");
+
+/* ---------- currency ---------- */
+const CURRENCIES = { GEL: "₾", RUB: "₽", EUR: "€", USD: "$", GBP: "£", KZT: "₸", UAH: "₴", AMD: "֏", AZN: "₼", BYN: "Br", UZS: "сўм", KGS: "сом", TRY: "₺", PLN: "zł", ILS: "₪", AED: "AED", THB: "฿", RSD: "дин" };
+const REGION_CURRENCY = { GE: "GEL", RU: "RUB", KZ: "KZT", UA: "UAH", AM: "AMD", AZ: "AZN", BY: "BYN", UZ: "UZS", KG: "KGS", TR: "TRY", PL: "PLN", IL: "ILS", AE: "AED", TH: "THB", RS: "RSD", US: "USD", GB: "GBP", DE: "EUR", FR: "EUR", ES: "EUR", IT: "EUR", NL: "EUR", CY: "EUR", ME: "EUR", PT: "EUR", FI: "EUR", LV: "EUR", LT: "EUR", EE: "EUR" };
+function currencyCode() {
+  const saved = LS.get("currency", "");
+  if (CURRENCIES[saved]) return saved;
+  const counts = {};
+  receipts.forEach(r => { if (r.currency && CURRENCIES[r.currency]) counts[r.currency] = (counts[r.currency] || 0) + 1; });
+  const fromReceipts = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+  if (fromReceipts) return fromReceipts;
+  const region = ((navigator.language || "").split("-")[1] || "").toUpperCase();
+  return REGION_CURRENCY[region] || "USD";
+}
+const cur = () => CURRENCIES[currencyCode()];
 const modelKey = () => (LS.get("model", "accurate") in MODELS ? LS.get("model", "accurate") : "accurate");
 
 /* ---------- state ---------- */
@@ -107,13 +122,13 @@ function renderBanner() {
 
 function renderSpend(list) {
   const total = list.reduce((s, r) => s + rTotal(r), 0);
-  const tEl = $("#total"); tEl.textContent = money(total); tEl.append(el("small", null, "₾"));
+  const tEl = $("#total"); tEl.textContent = money(total); tEl.append(el("small", null, cur()));
   const st = $("#stats"); st.innerHTML = "";
   const add = (b, t) => { const s = el("span"); s.append(el("b", null, b), " " + t); st.append(s); };
   add(String(list.length), plural(list.length, "запись", "записи", "записей"));
   const isCur = ym.y === now.getFullYear() && ym.m === now.getMonth();
   const dayCount = isCur ? new Date().getDate() : new Date(ym.y, ym.m + 1, 0).getDate();
-  if (list.length) add(money(total / dayCount) + " ₾", "в день");
+  if (list.length) add(money(total / dayCount) + " " + cur(), "в день");
   const pending = list.filter(needsParse).length;
   if (pending) add(String(pending), "ждут разбора");
 
@@ -128,7 +143,7 @@ function renderSpend(list) {
   Object.keys(groups).sort().reverse().forEach(d => {
     const g = groups[d].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
     const sec = el("div", "day"); const h = el("div", "dayhead");
-    h.append(el("b", null, dayLabel(d)), el("span", "num", money(g.reduce((s, r) => s + rTotal(r), 0)) + " ₾"));
+    h.append(el("b", null, dayLabel(d)), el("span", "num", money(g.reduce((s, r) => s + rTotal(r), 0)) + " " + cur()));
     const rows = el("div", "rows"); g.forEach(r => rows.append(rowEl(r)));
     sec.append(h, rows); box.append(sec);
   });
@@ -136,7 +151,7 @@ function renderSpend(list) {
 
 function rowEl(r) {
   const b = el("button", "row"); b.type = "button"; b.onclick = () => openReceipt(r.id);
-  const ph = el("div", "thumb", r.photo ? "" : ((r.items && r.items[0] && r.items[0].category) || "₾").slice(0, 2));
+  const ph = el("div", "thumb", r.photo ? "" : ((r.items && r.items[0] && r.items[0].category) || cur()).slice(0, 2));
   b.append(ph);
   if (r.photo) photoUrl(r.photo).then(u => { if (u) { const im = el("img", "thumb"); im.src = u; im.alt = ""; ph.replaceWith(im); } });
   const m = el("div", "rmain");
@@ -150,7 +165,7 @@ function rowEl(r) {
     else sub.append(it.length + " " + plural(it.length, "позиция", "позиции", "позиций") + (topCat(it) ? " · " + topCat(it) : ""));
   }
   m.append(sub); b.append(m);
-  b.append(el("div", "ramt", r.status === "parsing" && r.total == null ? "…" : money(rTotal(r)) + " ₾"));
+  b.append(el("div", "ramt", r.status === "parsing" && r.total == null ? "…" : money(rTotal(r)) + " " + cur()));
   return b;
 }
 
@@ -179,13 +194,13 @@ function renderStats(list) {
   const max = entries.length ? entries[0][1] : 1;
   entries.forEach(([k, v]) => {
     const row = el("div", "bar");
-    const r = el("span", "num", money(v) + " ₾"); r.append(el("span", "pct", Math.round(v / total * 100) + "%"));
+    const r = el("span", "num", money(v) + " " + cur()); r.append(el("span", "pct", Math.round(v / total * 100) + "%"));
     const tr = el("div", "track"); const f = el("div", "fill"); f.style.width = Math.max(2, v / max * 100) + "%"; tr.append(f);
     row.append(el("span", null, k), r, tr); cb.append(row);
   });
   const arr = Object.values(items);
-  fillTop($("#topItems"), arr.slice().sort((a, b) => b.sum - a.sum).slice(0, 8), o => money(o.sum) + " ₾", o => o.count > 1 ? "×" + o.count : "");
-  fillTop($("#freqItems"), arr.filter(o => o.count > 1).sort((a, b) => b.count - a.count || b.sum - a.sum).slice(0, 8), o => "×" + o.count, o => money(o.sum) + " ₾");
+  fillTop($("#topItems"), arr.slice().sort((a, b) => b.sum - a.sum).slice(0, 8), o => money(o.sum) + " " + cur(), o => o.count > 1 ? "×" + o.count : "");
+  fillTop($("#freqItems"), arr.filter(o => o.count > 1).sort((a, b) => b.count - a.count || b.sum - a.sum).slice(0, 8), o => "×" + o.count, o => money(o.sum) + " " + cur());
 }
 function fillTop(ul, arr, right, mid) {
   ul.innerHTML = "";
@@ -237,7 +252,7 @@ async function onPhoto(file) {
   const nowIso = new Date().toISOString();
   try {
     await store.putPhoto(id, blob);
-    await store.putReceipt({ id, createdAt: nowIso, updatedAt: nowIso, date: isoDay(new Date()), photo: id, status: "parsing", items: [], total: null, store: "", currency: "GEL", source: "photo" });
+    await store.putReceipt({ id, createdAt: nowIso, updatedAt: nowIso, date: isoDay(new Date()), photo: id, status: "parsing", items: [], total: null, store: "", currency: currencyCode(), source: "photo" });
   } catch (_) { toast("Не хватает места на телефоне, чтобы сохранить фото."); return; }
   store.requestPersistence();
   const d = new Date(); if (d.getFullYear() !== ym.y || d.getMonth() !== ym.m) { ym.y = d.getFullYear(); ym.m = d.getMonth(); }
@@ -261,6 +276,7 @@ async function parse(id, blob) {
       res = await recognizeFree(blob, msg => toast(msg, 6000));
       res.parsedBy = "free";
     }
+    if (!res.currency) delete res.currency;
     await store.updateReceipt(id, Object.assign({ status: "parsed", parseError: null }, res));
     const n = res.items.length;
     toast(n ? "Чек разобран: " + n + " " + plural(n, "позиция", "позиции", "позиций") + (key ? "" : ". Проверьте суммы и категории.") : "Позиции не нашлись. Заполните вручную или подключите Claude.");
@@ -314,7 +330,7 @@ async function openReceipt(id) {
   const fStore = inp("e-store", "text", r.store || "");
   const fDate = inp("e-date", "date", rDate(r));
   const fTotal = inp("e-total", "text", r.total != null ? String(r.total) : ""); fTotal.inputMode = "decimal";
-  fs.append(field("Магазин / место", fStore, true), field("Дата", fDate), field("Итого, ₾", fTotal));
+  fs.append(field("Магазин / место", fStore, true), field("Дата", fDate), field("Итого, " + cur(), fTotal));
   sh.append(fs);
 
   const items = (r.items || []).map(i => Object.assign({}, i));
@@ -322,7 +338,7 @@ async function openReceipt(id) {
   const updSum = () => {
     const s = paper.querySelector(".sumline"); if (!s) return;
     const sum = items.reduce((a, i) => a + num(i.price), 0);
-    s.innerHTML = ""; s.append(el("span", null, "Сумма позиций"), el("span", null, money(sum) + " ₾"));
+    s.innerHTML = ""; s.append(el("span", null, "Сумма позиций"), el("span", null, money(sum) + " " + cur()));
     const t = num(fTotal.value); s.classList.toggle("mismatch", items.length > 0 && t > 0 && Math.abs(t - sum) > 0.05);
   };
   const drawItems = () => {
@@ -335,7 +351,12 @@ async function openReceipt(id) {
       const d = el("button", "del", "×"); d.type = "button"; d.setAttribute("aria-label", "Удалить позицию"); d.onclick = () => { items.splice(idx, 1); drawItems(); };
       const c = catSelect("it-c-" + idx, it.category); c.setAttribute("aria-label", "Категория"); c.onchange = () => { it.category = c.value; };
       row.append(n, p, d, c);
-      if (it.orig && it.orig !== it.name) row.append(el("div", "orig", it.orig));
+      const meta = [];
+      if (it.generic && it.generic.toLowerCase() !== (it.name || "").toLowerCase()) meta.push(it.generic);
+      if (it.size && it.unit) meta.push((it.qty > 1 ? it.qty + " × " : "") + String(it.size).replace(".", ",") + " " + ({ kg: "кг", g: "г", l: "л", ml: "мл", pcs: "шт" }[it.unit] || it.unit));
+      const up = unitPrice(it); if (up) meta.push(money(up.value) + " " + cur() + "/" + up.per);
+      if (meta.length) row.append(el("div", "orig", meta.join(" · ")));
+      else if (it.orig && it.orig !== it.name) row.append(el("div", "orig", it.orig));
       paper.append(row);
     });
     paper.append(el("div", "sumline")); updSum();
@@ -351,7 +372,11 @@ async function openReceipt(id) {
   const b2 = el("div", "btns");
   const save = button("Сохранить", "primary", async () => {
     save.disabled = true;
-    const clean = items.filter(i => (i.name || "").trim() || num(i.price)).map(i => ({ name: (i.name || "").trim() || "Без названия", orig: i.orig || "", qty: num(i.qty) || 1, price: r2(i.price), category: CATS.includes(i.category) ? i.category : "Другое" }));
+    const clean = items.filter(i => (i.name || "").trim() || num(i.price)).map(i => {
+      const it = Object.assign({}, i, { name: (i.name || "").trim() || "Без названия", orig: i.orig || "", qty: num(i.qty) || 1, price: r2(i.price), category: CATS.includes(i.category) ? i.category : "Другое" });
+      const up = unitPrice(it); it.unitPrice = up ? up.value : null; it.unitPer = up ? up.per : null;
+      return it;
+    });
     const patch = { store: fStore.value.trim(), date: fDate.value || rDate(r), total: fTotal.value.trim() === "" ? null : r2(fTotal.value), items: clean };
     if (!busy && clean.length && r.source !== "manual") patch.status = "parsed";
     try { await store.updateReceipt(r.id, patch); toast("Сохранено"); closeSheet(); reload(); }
@@ -373,12 +398,12 @@ $("#addManual").onclick = () => {
   openId = null;
   const sh = sheetStart("Трата без чека");
   const fs = el("div", "fields");
-  const fWhat = inp("m-what", "text", ""); fWhat.placeholder = "Например: хинкали, овощи на рынке";
+  const fWhat = inp("m-what", "text", ""); fWhat.placeholder = "Например: обед в кафе, овощи на рынке";
   const fStore = inp("m-store", "text", ""); fStore.placeholder = "Кафе, рынок, магазин";
   const fSum = inp("m-sum", "text", ""); fSum.inputMode = "decimal"; fSum.placeholder = "0.00";
   const fDate = inp("m-date", "date", isoDay(new Date()));
   const fCat = catSelect("m-cat", "Кафе и доставка");
-  fs.append(field("Что купили", fWhat, true), field("Где", fStore, true), field("Сумма, ₾", fSum), field("Дата", fDate), field("Категория", fCat, true));
+  fs.append(field("Что купили", fWhat, true), field("Где", fStore, true), field("Сумма, " + cur(), fSum), field("Дата", fDate), field("Категория", fCat, true));
   sh.append(fs);
   const b = el("div", "btns");
   const save = button("Добавить", "primary", async () => {
@@ -386,7 +411,7 @@ $("#addManual").onclick = () => {
     save.disabled = true;
     const nowIso = new Date().toISOString();
     await store.putReceipt({ id: store.uid(), createdAt: nowIso, updatedAt: nowIso, date: fDate.value || isoDay(new Date()), photo: null, status: "manual", source: "manual",
-      store: fStore.value.trim(), total: s, currency: "GEL", items: [{ name: fWhat.value.trim() || fCat.value, orig: "", qty: 1, price: s, category: fCat.value }] });
+      store: fStore.value.trim(), total: s, currency: currencyCode(), items: [{ name: fWhat.value.trim() || fCat.value, orig: "", qty: 1, price: s, category: fCat.value }] });
     toast("Добавлено"); closeSheet(); reload();
   });
   b.append(save); sh.append(b);
@@ -452,6 +477,16 @@ function openSettings() {
     else si.append(el("p", "small-print", "Откройте меню браузера и выберите «Установить приложение» или «Добавить на главный экран»."));
     sh.append(si);
   }
+
+  /* currency */
+  const sc = el("div", "set-sec"); sc.append(el("h3", null, "Валюта"));
+  const curF = el("div", "f");
+  const curSel = el("select"); curSel.id = "currency";
+  Object.entries(CURRENCIES).forEach(([code, symbol]) => { const o = el("option", null, symbol + "  " + code); o.value = code; if (code === currencyCode()) o.selected = true; curSel.append(o); });
+  curSel.onchange = () => { LS.set("currency", curSel.value); render(); toast("Валюта: " + curSel.value); };
+  curF.append(curSel);
+  sc.append(curF, el("p", "small-print", "По умолчанию определяется по распознанным чекам."));
+  sh.append(sc);
 
   /* data */
   const sd = el("div", "set-sec"); sd.append(el("h3", null, "Мои данные"));

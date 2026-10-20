@@ -2,7 +2,7 @@
 export const CATS = ["Овощи и фрукты", "Мясо и рыба", "Молочное и яйца", "Хлеб и выпечка", "Крупы и бакалея", "Сладкое и снеки", "Напитки", "Алкоголь", "Готовая еда", "Кафе и доставка", "Бытовая химия", "Гигиена и аптека", "Другое"];
 
 export const MODELS = {
-  accurate: { id: "claude-sonnet-5-5", label: "Точнее", hint: "Лучше читает мятые и грузинские чеки" },
+  accurate: { id: "claude-sonnet-5-5", label: "Точнее", hint: "Лучше читает мятые и длинные чеки" },
   cheap: { id: "claude-haiku-5-5", label: "Дешевле", hint: "Быстрее и в несколько раз дешевле" },
 };
 
@@ -36,15 +36,27 @@ export async function checkKey(key) {
   return true;
 }
 
-const PROMPT = `Это фото кассового чека. Скорее всего чек из Грузии: текст может быть на грузинском, русском или английском, валюта обычно лари (GEL).
+export const TAGS = ["свежие овощи и фрукты", "цельнозерновое", "белок", "молочное", "переработанное мясо", "готовая еда", "сладкое", "солёные снеки", "сладкий напиток", "алкоголь", "фастфуд", "непищевое"];
+const UNITS = ["kg", "g", "l", "ml", "pcs"];
+
+const PROMPT = `Это фото кассового чека. Текст может быть на любом языке.
 Распознай чек и ответь ТОЛЬКО одним JSON-объектом без пояснений и без markdown:
-{"store":"название магазина или заведения","date":"YYYY-MM-DD или null","currency":"GEL","total":12.35,"items":[{"name":"краткое понятное название товара по-русски","orig":"название как в чеке","qty":1,"price":3.20,"category":"Молочное и яйца"}]}
-Правила:
+{"store":"название магазина или заведения","date":"YYYY-MM-DD или null","currency":"EUR","total":12.35,"items":[{"name":"Молоко Санте 2,5% 1 л","generic":"молоко 2,5%","brand":"Sante","orig":"название как в чеке","qty":1,"size":1,"unit":"l","price":3.20,"category":"Молочное и яйца","type":"пастеризованное молоко","tags":["молочное"]}]}
+Поля позиции:
+- name — краткое понятное название по-русски, с брендом и объёмом, если они есть.
+- generic — общее название продукта по-русски без бренда и упаковки, в нижнем регистре, одинаковое для одного и того же продукта в разных магазинах: «молоко 2,5%», «хлеб белый», «куриное филе», «сыр моцарелла».
+- brand — бренд или собственная марка магазина, иначе null.
+- qty — количество упаковок или штук (для весового товара 1).
+- size и unit — вес или объём одной упаковки: unit строго одно из ${UNITS.join(", ")}. Для весового товара — фактический вес из чека (например size 0.734, unit "kg"). Если неизвестно — null.
 - price — итоговая сумма по строке с учётом количества и скидки на эту позицию.
-- Если есть общая скидка, добавь позицию "Скидка" с отрицательной price и категорией "Другое".
-- total — итог к оплате из чека.
 - category — строго одна из: ${CATS.join(", ")}. Чек из кафе или ресторана — "Кафе и доставка".
-- Не выдумывай позиции. Если строку не прочитать, name = "Не распознано".
+- type — чуть более подробный тип продукта для оценки питания: «цельнозерновой хлеб», «белый батон», «сладкий йогурт», «натуральный йогурт», «газировка с сахаром», «вода».
+- tags — от 0 до 3 меток строго из списка: ${TAGS.join(", ")}.
+Правила:
+- Если есть общая скидка, добавь позицию "Скидка" с отрицательной price, категорией "Другое" и пустыми tags.
+- total — итог к оплате из чека.
+- currency — трёхбуквенный код валюты (ISO 4217): определи по символу, языку или адресу в чеке. Если определить нельзя — null.
+- Не выдумывай позиции и бренды. Если строку не прочитать, name = "Не распознано".
 - Если на фото не чек, ответь {"error":"not_receipt"}.`;
 
 function blobToBase64(blob) {
@@ -69,16 +81,39 @@ function extractJson(text) {
 const num = v => { const n = parseFloat(String(v).replace(",", ".")); return isFinite(n) ? n : 0; };
 const r2 = v => Math.round(num(v) * 100) / 100;
 
+// Price per kg, litre or piece, so the same product can be compared across stores.
+export function unitPrice(item) {
+  const size = num(item.size), qty = num(item.qty) || 1, price = num(item.price);
+  if (!size || !item.unit || price <= 0) return null;
+  const base = item.unit === "g" || item.unit === "ml" ? size / 1000 : size;
+  const amount = base * qty;
+  if (!amount) return null;
+  return { value: r2(price / amount), per: item.unit === "g" || item.unit === "kg" ? "кг" : item.unit === "pcs" ? "шт" : "л" };
+}
+
 export function normalize(res) {
-  const items = (Array.isArray(res.items) ? res.items : []).map(i => ({
-    name: String((i && i.name) || "Не распознано").slice(0, 120),
-    orig: String((i && i.orig) || "").slice(0, 160),
-    qty: num(i && i.qty) || 1,
-    price: r2(i && i.price),
-    category: CATS.includes(i && i.category) ? i.category : "Другое",
-  }));
+  const items = (Array.isArray(res.items) ? res.items : []).map(i => {
+    i = i || {};
+    const it = {
+      name: String(i.name || "Не распознано").slice(0, 120),
+      orig: String(i.orig || "").slice(0, 160),
+      generic: String(i.generic || "").toLowerCase().slice(0, 80),
+      brand: i.brand ? String(i.brand).slice(0, 60) : null,
+      qty: num(i.qty) || 1,
+      size: num(i.size) || null,
+      unit: UNITS.includes(i.unit) ? i.unit : null,
+      price: r2(i.price),
+      category: CATS.includes(i.category) ? i.category : "Другое",
+      type: String(i.type || "").slice(0, 80),
+      tags: (Array.isArray(i.tags) ? i.tags : []).filter(t => TAGS.includes(t)).slice(0, 3),
+    };
+    const up = unitPrice(it);
+    it.unitPrice = up ? up.value : null;
+    it.unitPer = up ? up.per : null;
+    return it;
+  });
   const sum = items.reduce((s, i) => s + i.price, 0);
-  const out = { items, total: r2(res.total) || r2(sum), store: String(res.store || "").slice(0, 80), currency: String(res.currency || "GEL").slice(0, 6) };
+  const out = { items, total: r2(res.total) || r2(sum), store: String(res.store || "").slice(0, 80), currency: /^[A-Z]{3}$/.test(String(res.currency || "")) ? res.currency : null, schema: 2 };
   if (typeof res.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(res.date)) out.date = res.date;
   return out;
 }
@@ -87,7 +122,7 @@ export async function recognizeWithClaude(blob, key, modelId) {
   const data = await blobToBase64(blob);
   const body = {
     model: modelId,
-    max_tokens: 4096,
+    max_tokens: 8192,
     messages: [{ role: "user", content: [
       { type: "image", source: { type: "base64", media_type: blob.type || "image/jpeg", data } },
       { type: "text", text: PROMPT },
@@ -129,7 +164,7 @@ export function parseOcrText(text) {
   for (const line of lines) {
     const d = line.match(/(\d{2})[./-](\d{2})[./-](\d{4})/);
     if (d && !date) date = `${d[3]}-${d[2]}-${d[1]}`;
-    const m = line.match(/^(.*?)[\s.:*x×]+(-?\d{1,5}[.,]\d{2})\s*(?:₾|gel|ლ|a|b|ა)?\s*$/i);
+    const m = line.match(/^(.*?)[\s.:*x×]+(-?\d{1,5}[.,]\d{2})\s*(?:₾|₽|€|\$|£|₸|₴|֏|₼|₺|zł|gel|rub|eur|usd|ლ|руб|р|a|b|ა)?\s*$/i);
     if (!m) continue;
     const name = m[1].replace(/\s+\d+([.,]\d+)?\s*[x×*]?\s*$/i, "").replace(/[\s.:*]+$/, "").trim();
     const price = num(m[2]);
@@ -138,7 +173,7 @@ export function parseOcrText(text) {
     items.push({ name, orig: name, qty: 1, price: r2(price), category: "Другое" });
   }
   const storeLine = lines.find(l => !/\d/.test(l) && l.length > 2) || "";
-  const out = { items, total: r2(total) || r2(items.reduce((s, i) => s + i.price, 0)), store: storeLine.slice(0, 80), currency: "GEL" };
+  const out = { items, total: r2(total) || r2(items.reduce((s, i) => s + i.price, 0)), store: storeLine.slice(0, 80), currency: null };
   if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) out.date = date;
   return out;
 }
