@@ -1,6 +1,6 @@
 import * as store from "./db.js";
 import { CATS, MODELS, checkKey, recognizeWithClaude, recognizeFree, unitPrice } from "./recognize.js";
-import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion } from "./native.js";
+import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion, checkForUpdates, updateStatus } from "./native.js";
 
 const MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
 const MONTHS_G = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
@@ -495,7 +495,32 @@ function openSettings() {
   bd.append(button("Сохранить копию", "small", exportData), button("Восстановить из копии", "small ghost", () => { $("#importInput").value = ""; $("#importInput").click(); }), button("Фото из галереи", "small ghost", () => { closeSheet(); pickPhoto(true); }));
   sd.append(bd);
   sh.append(sd);
-  sh.append(el("p", "small-print", "Версия " + appVersion()));
+  /* updates */
+  const su = el("div", "set-sec"); su.append(el("h3", null, "Обновления"));
+  su.append(el("p", "small-print", "Версия " + appVersion()));
+  if (isNative()) {
+    const line = el("p", "small-print");
+    const describe = st => ({
+      idle: "Проверка ещё не запускалась.",
+      checking: "Проверяю…",
+      latest: "Установлена последняя версия.",
+      downloading: "Скачиваю версию " + st.detail + "…",
+      ready: "Версия " + st.detail + " скачана. Нажмите «Перезапустить».",
+      error: st.detail,
+    }[st.state] || "");
+    line.textContent = describe(updateStatus());
+    const bu = el("div", "btns");
+    const chk = button("Проверить обновления", "small", async () => {
+      chk.disabled = true; line.textContent = "Проверяю…";
+      const st = await checkForUpdates();
+      line.textContent = describe(st); chk.disabled = false;
+      if (st.state === "ready") openSettings();
+    });
+    bu.append(chk);
+    if (updateStatus().ready) bu.append(button("Перезапустить", "small primary", () => applyUpdateNow().catch(() => toast("Не удалось перезапустить. Закройте и откройте приложение."))));
+    su.append(line, bu);
+  }
+  sh.append(su);
 }
 
 async function doInstall() {
