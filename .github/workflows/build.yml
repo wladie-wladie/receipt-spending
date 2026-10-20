@@ -20,6 +20,7 @@ env:
 jobs:
   web:
     name: Сайт и пакет обновления
+    needs: android
     runs-on: ubuntu-latest
     environment:
       name: github-pages
@@ -41,6 +42,11 @@ jobs:
           {"version":"${APP_VERSION}","url":"https://wladie-wladie.github.io/receipt-spending/updates/bundle-${APP_VERSION}.zip","builtAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
           JSON
           touch _site/.nojekyll
+      - name: Положить APK на сайт
+        uses: actions/download-artifact@v4
+        with:
+          name: apk
+          path: _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
@@ -72,6 +78,11 @@ jobs:
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
           cp app/build/outputs/apk/release/app-release.apk ../traty.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: traty.apk
+          retention-days: 3
       - name: Опубликовать APK
         uses: softprops/action-gh-release@v2
         with:
