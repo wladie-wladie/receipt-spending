@@ -1,5 +1,6 @@
 import * as store from "./db.js";
 import { CATS, MODELS, checkKey, recognizeWithClaude, recognizeFree } from "./recognize.js";
+import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion } from "./native.js";
 
 const MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
 const MONTHS_G = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
@@ -32,6 +33,7 @@ let tab = "spend", openId = null;
 const parsingNow = new Set();
 const photoUrls = new Map();
 let installEvent = null;
+let updateInfo = null;
 
 async function reload() { receipts = await store.allReceipts(); render(); }
 
@@ -75,11 +77,18 @@ function render() {
   if (tab === "spend") renderSpend(list); else renderStats(list);
 }
 
-function isStandalone() { return window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true; }
-const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+function isStandalone() { return isNative() || window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true; }
+const isIOS = () => !isNative() && /iphone|ipad|ipod/i.test(navigator.userAgent);
 
 function renderBanner() {
   const box = $("#banner"); box.innerHTML = "";
+  if (updateInfo) {
+    const b = el("div", "banner"); const t = el("div", "b-text");
+    t.append(el("b", null, "Загружена новая версия"), el("p", null, updateInfo.notes || "Она включится сама при следующем запуске, или можно перезапустить сейчас."));
+    const a = el("div", "b-actions");
+    a.append(button("Перезапустить", "small primary", () => applyUpdateNow().catch(() => toast("Не удалось обновить. Перезапустите приложение."))), button("Позже", "small ghost", () => { updateInfo = null; render(); }));
+    t.append(a); b.append(t); box.append(b); return;
+  }
   if (!apiKey() && LS.get("connectDismissed") !== "1") {
     const b = el("div", "banner"); const t = el("div", "b-text");
     t.append(el("b", null, "Подключите Claude"), el("p", null, "Тогда чеки будут сами разбираться на позиции и категории. Без него работает бесплатное распознавание текста, но хуже."));
@@ -111,7 +120,7 @@ function renderSpend(list) {
   const box = $("#list"); box.innerHTML = "";
   if (!list.length) {
     box.append(emptyState("В этом месяце пока пусто", "Нажмите зелёную кнопку внизу и сфотографируйте чек. Позиции появятся здесь.",
-      [button("Выбрать фото из галереи", "small", () => $("#galleryInput").click())]));
+      [button("Выбрать фото из галереи", "small", () => pickPhoto(true))]));
     return;
   }
   const groups = {};
@@ -196,7 +205,16 @@ $("#prev").onclick = () => { ym.m--; if (ym.m < 0) { ym.m = 11; ym.y--; } render
 $("#next").onclick = () => { ym.m++; if (ym.m > 11) { ym.m = 0; ym.y++; } render(); };
 
 /* ---------- photo flow ---------- */
-$("#camBtn").onclick = () => { $("#photoInput").value = ""; $("#photoInput").click(); };
+async function pickPhoto(fromGallery) {
+  if (isNative()) {
+    try { const blob = await takePhoto(fromGallery); if (blob) onPhoto(blob); }
+    catch (_) { toast("Не удалось открыть камеру. Проверьте, что приложению разрешён доступ к камере."); }
+    return;
+  }
+  const input = fromGallery ? $("#galleryInput") : $("#photoInput");
+  input.value = ""; input.click();
+}
+$("#camBtn").onclick = () => pickPhoto(false);
 $("#photoInput").onchange = e => { const f = e.target.files && e.target.files[0]; if (f) onPhoto(f); };
 $("#galleryInput").onchange = e => { const f = e.target.files && e.target.files[0]; if (f) onPhoto(f); e.target.value = ""; };
 
@@ -225,6 +243,7 @@ async function onPhoto(file) {
   const d = new Date(); if (d.getFullYear() !== ym.y || d.getMonth() !== ym.m) { ym.y = d.getFullYear(); ym.m = d.getMonth(); }
   if (tab !== "spend") setTab("spend");
   await reload();
+initUpdates(info => { updateInfo = info; render(); });
   parse(id, blob);
 }
 
@@ -438,9 +457,10 @@ function openSettings() {
   const sd = el("div", "set-sec"); sd.append(el("h3", null, "Мои данные"));
   sd.append(el("p", "small-print", "Все чеки и фото хранятся только на этом телефоне. Сохраняйте копию, чтобы не потерять их при смене телефона или очистке браузера."));
   const bd = el("div", "btns");
-  bd.append(button("Сохранить копию", "small", exportData), button("Восстановить из копии", "small ghost", () => { $("#importInput").value = ""; $("#importInput").click(); }), button("Фото из галереи", "small ghost", () => { closeSheet(); $("#galleryInput").click(); }));
+  bd.append(button("Сохранить копию", "small", exportData), button("Восстановить из копии", "small ghost", () => { $("#importInput").value = ""; $("#importInput").click(); }), button("Фото из галереи", "small ghost", () => { closeSheet(); pickPhoto(true); }));
   sd.append(bd);
   sh.append(sd);
+  sh.append(el("p", "small-print", "Версия " + appVersion()));
 }
 
 async function doInstall() {
@@ -453,10 +473,16 @@ async function doInstall() {
 async function exportData() {
   const all = await store.allReceipts();
   const data = { app: "receipt-spending", version: 1, exportedAt: new Date().toISOString(), receipts: all };
+  const fileName = "traty-" + isoDay(new Date()) + ".json";
+  if (isNative()) {
+    try { await shareTextFile(fileName, JSON.stringify(data, null, 2)); }
+    catch (e) { if (!/cancel/i.test(String(e && e.message))) toast("Не удалось сохранить копию."); }
+    return;
+  }
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "траты-по-чекам-" + isoDay(new Date()) + ".json";
+  a.download = fileName;
   document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   toast("Копия сохранена (без фото)");
@@ -475,7 +501,7 @@ $("#importInput").onchange = async e => {
 /* ---------- install & offline ---------- */
 window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvent = e; render(); });
 window.addEventListener("appinstalled", () => { installEvent = null; toast("Приложение установлено"); render(); });
-if ("serviceWorker" in navigator) {
+if (!isNative() && "serviceWorker" in navigator) {
   window.addEventListener("load", () => { navigator.serviceWorker.register("sw.js").catch(() => {}); });
 }
 

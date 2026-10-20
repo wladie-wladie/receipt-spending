@@ -1,0 +1,15 @@
+{
+  "appId": "io.github.wladie.receiptspending",
+  "appName": "Траты по чекам",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "CapacitorUpdater": {
+      "autoUpdate": false,
+      "statsUrl": "",
+      "appReadyTimeout": 10000
+    }
+  }
+}

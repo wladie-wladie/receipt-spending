@@ -1,0 +1,21 @@
+{
+  "name": "receipt-spending",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Траты по чекам — учёт трат по фото чеков",
+  "scripts": {
+    "build:web": "node scripts/build-web.mjs",
+    "sync": "npm run build:web && npx cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.2",
+    "@capacitor/camera": "8.2.5",
+    "@capacitor/core": "8.5.2",
+    "@capacitor/filesystem": "8.1.4",
+    "@capacitor/share": "8.0.3",
+    "@capgo/capacitor-updater": "8.52.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.2"
+  }
+}

@@ -1,7 +1,7 @@
 // Offline support: the app shell is cached; API calls always go to the network.
-const VERSION = "v1";
+const VERSION = "__APP_VERSION__";
 const CACHE = "receipt-spending-" + VERSION;
-const SHELL = ["./", "index.html", "styles.css", "js/app.js", "js/db.js", "js/recognize.js", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png"];
+const SHELL = ["./", "index.html", "styles.css", "js/app.js", "js/db.js", "js/recognize.js", "js/native.js", "js/version.js", "js/capacitor.js", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png"];
 
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
