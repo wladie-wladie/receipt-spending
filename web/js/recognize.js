@@ -1,4 +1,6 @@
 // Receipt recognition: Claude API with the user's own key, or free on-device OCR.
+import { SPEND_CATS } from "./bank.js";
+
 export const CATS = ["Овощи и фрукты", "Мясо и рыба", "Молочное и яйца", "Хлеб и выпечка", "Крупы и бакалея", "Сладкое и снеки", "Напитки", "Алкоголь", "Готовая еда", "Кафе и доставка", "Бытовая химия", "Гигиена и аптека", "Другое"];
 
 export const MODELS = {
@@ -41,7 +43,7 @@ const UNITS = ["kg", "g", "l", "ml", "pcs"];
 
 const PROMPT = `Это фото кассового чека. Текст может быть на любом языке.
 Распознай чек и ответь ТОЛЬКО одним JSON-объектом без пояснений и без markdown:
-{"store":"название магазина или заведения","date":"YYYY-MM-DD или null","currency":"EUR","total":12.35,"items":[{"name":"Молоко Санте 2,5% 1 л","generic":"молоко 2,5%","brand":"Sante","orig":"название как в чеке","qty":1,"size":1,"unit":"l","price":3.20,"category":"Молочное и яйца","type":"пастеризованное молоко","tags":["молочное"]}]}
+{"store":"название магазина или заведения","date":"YYYY-MM-DD или null","time":"HH:MM или null","currency":"EUR","spend_category":"Продукты","total":12.35,"items":[{"name":"Молоко Санте 2,5% 1 л","generic":"молоко 2,5%","brand":"Sante","orig":"название как в чеке","qty":1,"size":1,"unit":"l","price":3.20,"category":"Молочное и яйца","type":"пастеризованное молоко","tags":["молочное"]}]}
 Поля позиции:
 - name — краткое понятное название по-русски, с брендом и объёмом, если они есть.
 - generic — общее название продукта по-русски без бренда и упаковки, в нижнем регистре, одинаковое для одного и того же продукта в разных магазинах: «молоко 2,5%», «хлеб белый», «куриное филе», «сыр моцарелла».
@@ -50,6 +52,7 @@ const PROMPT = `Это фото кассового чека. Текст може
 - size и unit — вес или объём одной упаковки: unit строго одно из ${UNITS.join(", ")}. Для весового товара — фактический вес из чека (например size 0.734, unit "kg"). Если неизвестно — null.
 - price — итоговая сумма по строке с учётом количества и скидки на эту позицию.
 - category — строго одна из: ${CATS.join(", ")}. Чек из кафе или ресторана — "Кафе и доставка".
+Поле чека spend_category — общая категория траты для всего чека, строго одна из: ${SPEND_CATS.join(", ")}.
 - type — чуть более подробный тип продукта для оценки питания: «цельнозерновой хлеб», «белый батон», «сладкий йогурт», «натуральный йогурт», «газировка с сахаром», «вода».
 - tags — от 0 до 3 меток строго из списка: ${TAGS.join(", ")}.
 Правила:
@@ -115,6 +118,8 @@ export function normalize(res) {
   const sum = items.reduce((s, i) => s + i.price, 0);
   const out = { items, total: r2(res.total) || r2(sum), store: String(res.store || "").slice(0, 80), currency: /^[A-Z]{3}$/.test(String(res.currency || "")) ? res.currency : null, schema: 2 };
   if (typeof res.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(res.date)) out.date = res.date;
+  if (typeof res.time === "string" && /^\d{1,2}:\d{2}$/.test(res.time)) out.time = res.time;
+  if (SPEND_CATS.includes(res.spend_category)) out.category = res.spend_category;
   return out;
 }
 
@@ -187,4 +192,39 @@ export async function recognizeFree(blob, onProgress) {
   onProgress && onProgress("Читаю текст чека…");
   const { data } = await worker.recognize(blob);
   return parseOcrText(data && data.text);
+}
+
+/* ---------- bank operations: clean merchant names and suggest categories ---------- */
+export async function classifyOperations(ops, key, spendCats) {
+  // ops: [{ i, text, amount, currency, merchant }]
+  const prompt = `Ниже уведомления банка об операциях. Для каждой определи:
+- merchant — понятное название места или получателя (например «Spar», «Яндекс Такси», «Wolt», «Иван П.»), без города, номера терминала и кода страны;
+- kind — "expense" (расход) или "income" (поступление: зарплата, возврат, перевод вам);
+- category — для расхода строго одна из: ${spendCats.join(", ")}; для поступления — "Поступления".
+Ответь ТОЛЬКО JSON-массивом вида [{"i":0,"merchant":"Spar","kind":"expense","category":"Продукты"}] без пояснений.
+
+${ops.map(o => `#${o.i}: ${String(o.text).replace(/\s+/g, " ").slice(0, 400)}`).join("\n")}`;
+  let res;
+  try {
+    res = await fetch(API + "/messages", {
+      method: "POST", headers: headers(key),
+      body: JSON.stringify({ model: MODELS.cheap.id, max_tokens: 2048, messages: [{ role: "user", content: prompt }] }),
+    });
+  } catch (_) { throw new RecognizeError("network", "Нет связи с Claude."); }
+  let json = null; try { json = await res.json(); } catch (_) {}
+  if (!res.ok) throw apiError(res.status, json);
+  const text = (json && Array.isArray(json.content) ? json.content : []).filter(c => c.type === "text").map(c => c.text).join("\n");
+  const t = text.trim();
+  let arr = null;
+  try { arr = JSON.parse(t); } catch (_) {
+    const a = t.indexOf("["), b = t.lastIndexOf("]");
+    if (a >= 0 && b > a) { try { arr = JSON.parse(t.slice(a, b + 1)); } catch (_) {} }
+  }
+  if (!Array.isArray(arr)) throw new RecognizeError("bad_answer", "Claude ответил непонятно.");
+  return arr.filter(x => x && Number.isInteger(x.i)).map(x => ({
+    i: x.i,
+    merchant: String(x.merchant || "").slice(0, 60),
+    kind: x.kind === "income" ? "income" : "expense",
+    category: spendCats.includes(x.category) ? x.category : (x.kind === "income" ? "Поступления" : null),
+  }));
 }

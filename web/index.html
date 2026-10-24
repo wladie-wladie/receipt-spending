@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Траты по чекам</title>
-<meta name="description" content="Фотографируйте чеки — приложение разберёт их на позиции и покажет, на что уходят деньги.">
+<title>Траты</title>
+<meta name="description" content="Учёт всех трат: уведомления банка, фото чеков и ручной ввод. Покажет, на что уходят деньги.">
 <meta name="theme-color" content="#1D6B57" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0E1412" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="manifest.webmanifest">
@@ -44,9 +44,19 @@
   </section>
 
   <section id="view-stats" hidden>
-    <div class="card"><h2>По категориям</h2><div id="cats"></div></div>
-    <div class="card"><h2>На что уходит больше всего</h2><ul class="top-items" id="topItems"></ul></div>
-    <div class="card"><h2>Чаще всего покупаю</h2><ul class="top-items" id="freqItems"></ul></div>
+    <div class="seg-tabs">
+      <button type="button" id="st-all" aria-pressed="true">Все траты</button>
+      <button type="button" id="st-food" aria-pressed="false">Продукты</button>
+    </div>
+    <div id="stats-all">
+      <div class="card"><h2>По категориям</h2><div id="spendCats"></div></div>
+      <div class="card"><h2>Где трачу больше всего</h2><ul class="top-items" id="topPlaces"></ul></div>
+    </div>
+    <div id="stats-food" hidden>
+      <div class="card"><h2>Продукты по группам</h2><div id="cats"></div></div>
+      <div class="card"><h2>На что уходит больше всего</h2><ul class="top-items" id="topItems"></ul></div>
+      <div class="card"><h2>Чаще всего покупаю</h2><ul class="top-items" id="freqItems"></ul></div>
+    </div>
   </section>
 </div>
 
