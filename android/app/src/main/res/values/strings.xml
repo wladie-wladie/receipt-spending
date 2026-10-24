@@ -4,4 +4,5 @@
     <string name="title_activity_main">Траты по чекам</string>
     <string name="package_name">io.github.wladie.receiptspending</string>
     <string name="custom_url_scheme">io.github.wladie.receiptspending</string>
+    <string name="notification_listener_label">Траты: учёт операций из уведомлений банка</string>
 </resources>
