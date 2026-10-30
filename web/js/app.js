@@ -4,6 +4,7 @@ import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVer
 import * as bank from "./bank.js";
 
 const { SPEND_CATS, INCOME_CAT } = bank;
+const NEW_CAT = "__new__";
 const MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"];
 const MONTHS_G = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
 const CONSOLE_KEYS = "https://platform.claude.com/settings/keys";
@@ -29,6 +30,18 @@ const LS = {
   json(k, d) { try { return JSON.parse(LS.get(k, "")) || d; } catch (_) { return d; } },
 };
 const apiKey = () => LS.get("apiKey", "");
+
+/* ---------- categories: built-in plus the user's own ---------- */
+const customCats = () => LS.json("customCats", []).filter(c => typeof c === "string" && c.trim());
+const allCats = () => { const c = customCats().filter(x => !SPEND_CATS.includes(x)); const i = SPEND_CATS.indexOf("Другое"); return [...SPEND_CATS.slice(0, i), ...c, ...SPEND_CATS.slice(i)]; };
+function addCustomCat(name) {
+  name = String(name || "").trim().replace(/\s+/g, " ").slice(0, 40);
+  if (!name) return { error: "Введите название категории" };
+  const exists = [...allCats(), INCOME_CAT].find(c => c.toLowerCase() === name.toLowerCase());
+  if (exists) return { name: exists, existed: true };
+  LS.set("customCats", JSON.stringify([...customCats(), name]));
+  return { name };
+}
 const modelKey = () => (LS.get("model", "accurate") in MODELS ? LS.get("model", "accurate") : "accurate");
 
 /* ---------- currency ---------- */
@@ -71,7 +84,7 @@ const ITEM_TO_SPEND = { "Кафе и доставка": "Кафе и ресто�
 const rKind = r => r.kind === "income" ? "income" : "expense";
 function spendCat(r) {
   if (rKind(r) === "income") return INCOME_CAT;
-  if (r.category && SPEND_CATS.includes(r.category)) return r.category;
+  if (r.category && allCats().includes(r.category)) return r.category;
   const its = r.items || [];
   if (its.length) {
     const sums = {};
@@ -553,7 +566,7 @@ async function classifyNew() {
   if (!todo.length) return;
   classifying = true;
   try {
-    const res = await classifyOperations(todo.map((r, i) => ({ i, text: r.raw || r.merchant, amount: r.total, currency: r.currency, merchant: r.merchant })), key, SPEND_CATS);
+    const res = await classifyOperations(todo.map((r, i) => ({ i, text: r.raw || r.merchant, amount: r.total, currency: r.currency, merchant: r.merchant })), key, allCats());
     for (const x of res) {
       const r = todo[x.i]; if (!r) continue;
       const patch = { aiChecked: true };
@@ -609,6 +622,31 @@ function sheetStart(title, mode) {
 }
 function field(label, input, wide) { const f = el("div", "f" + (wide ? " wide" : "")); const l = el("label", null, label); l.htmlFor = input.id; f.append(l, input); return f; }
 function inp(id, type, val) { const i = el("input"); i.id = id; i.type = type; if (val != null) i.value = val; return i; }
+const catChoices = () => [...allCats(), [NEW_CAT, "+ Новая категория…"]];
+/** Category picker; choosing "+ Новая категория…" shows a field to name it right below. */
+function catSelect(id, options, val) {
+  const s = select(id, options, val);
+  let prev = s.value;
+  s.addEventListener("change", () => {
+    if (s.value !== NEW_CAT) { prev = s.value; return; }
+    s.value = prev;
+    const host = s.parentElement; if (!host || host.querySelector(".newcat")) return;
+    const box = el("div", "keyrow newcat"); box.style.marginTop = "8px";
+    const i = inp(id + "-new", "text", ""); i.placeholder = "Название, например «Спорт»"; i.maxLength = 40;
+    const ok = button("Добавить", "primary small", () => {
+      const res = addCustomCat(i.value);
+      if (res.error) { toast(res.error); i.focus(); return; }
+      if (!res.existed) { const o = el("option", null, res.name); o.value = res.name; s.insertBefore(o, s.querySelector('option[value="Другое"]') || s.querySelector('option[value="' + NEW_CAT + '"]')); toast("Категория «" + res.name + "» добавлена"); }
+      s.value = res.name; prev = res.name; box.remove();
+      s.dispatchEvent(new Event("change"));
+    });
+    ok.style.flex = "none";
+    const cancel = button("×", "small ghost", () => box.remove()); cancel.style.flex = "none"; cancel.setAttribute("aria-label", "Отмена");
+    i.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ok.click(); } });
+    box.append(i, ok, cancel); host.append(box); setTimeout(() => i.focus(), 30);
+  });
+  return s;
+}
 function select(id, options, val) { const s = el("select"); s.id = id; options.forEach(c => { const o = el("option", null, Array.isArray(c) ? c[1] : c); o.value = Array.isArray(c) ? c[0] : c; if (o.value === val) o.selected = true; s.append(o); }); return s; }
 
 /* ---------- record details ---------- */
@@ -636,10 +674,10 @@ async function openReceipt(id) {
   const fDate = inp("e-date", "date", rDate(r));
   const fTotal = inp("e-total", "text", r.total != null ? String(r.total) : ""); fTotal.inputMode = "decimal";
   const fKind = select("e-kind", [["expense", "Расход"], ["income", "Поступление"]], rKind(r));
-  const catOptions = () => fKind.value === "income" ? [INCOME_CAT] : SPEND_CATS;
-  let fCat = select("e-cat", catOptions(), rKind(r) === "income" ? INCOME_CAT : (r.category || spendCat(r)));
+  const catOptions = () => fKind.value === "income" ? [INCOME_CAT] : catChoices();
+  let fCat = catSelect("e-cat", catOptions(), rKind(r) === "income" ? INCOME_CAT : spendCat(r));
   const catField = field("Категория", fCat, true);
-  fKind.onchange = () => { const n = select("e-cat", catOptions(), fKind.value === "income" ? INCOME_CAT : spendCat(r)); fCat.replaceWith(n); fCat = n; };
+  fKind.onchange = () => { const n = catSelect("e-cat", catOptions(), fKind.value === "income" ? INCOME_CAT : spendCat(r)); fCat.replaceWith(n); fCat = n; };
   fs.append(field("Место или получатель", fStore, true), field("Дата", fDate), field("Сумма, " + symbolOf(rCur(r)), fTotal), catField, field("Тип", fKind, true));
   sh.append(fs);
 
@@ -721,7 +759,7 @@ $("#addManual").onclick = () => {
   const sh = sheetStart("Трата без чека", "manual");
   const fs = el("div", "fields");
   const fSum = inp("m-sum", "text", ""); fSum.inputMode = "decimal"; fSum.placeholder = "0.00";
-  const fCat = select("m-cat", SPEND_CATS, "Кафе и рестораны");
+  const fCat = catSelect("m-cat", catChoices(), "Кафе и рестораны");
   const fStore = inp("m-store", "text", ""); fStore.placeholder = "Кафе, рынок, такси, кому перевели";
   const fDate = inp("m-date", "date", isoDay(new Date()));
   const fKind = select("m-kind", [["expense", "Расход"], ["income", "Поступление"]], "expense");
@@ -834,6 +872,42 @@ function openSettings() {
   sb.append(button("Настроить", "small", openBankSettings));
   sh.append(sb);
 
+  /* categories */
+  const sk = el("div", "set-sec"); sk.append(el("h3", null, "Категории"));
+  const mine = customCats();
+  sk.append(el("p", "small-print", "Стандартные: " + SPEND_CATS.join(", ") + "."));
+  if (mine.length) {
+    const lst = el("div", "app-list");
+    mine.forEach(c => {
+      const row = el("div", "app-row cat-row");
+      const used = records.filter(r => r.category === c).length;
+      row.append(el("span", null, c + (used ? " · " + used : "")));
+      let armed = false;
+      const del = button("Удалить", "small ghost danger", async () => {
+        if (!armed) { armed = true; del.textContent = used ? "Траты → «Другое»?" : "Точно?"; setTimeout(() => { armed = false; del.textContent = "Удалить"; }, 4000); return; }
+        LS.set("customCats", JSON.stringify(customCats().filter(x => x !== c)));
+        const rl = rules(); Object.keys(rl).forEach(k => { if (rl[k] === c) delete rl[k]; }); LS.set("rules", JSON.stringify(rl));
+        for (const r of records.filter(x => x.category === c)) await store.updateReceipt(r.id, { category: "Другое" });
+        toast("Категория «" + c + "» удалена"); await reload(); openSettings();
+      });
+      del.style.marginLeft = "auto";
+      row.append(del); lst.append(row);
+    });
+    sk.append(lst);
+  }
+  const addRow = el("div", "keyrow");
+  const ci = inp("new-cat", "text", ""); ci.placeholder = "Новая категория"; ci.maxLength = 40;
+  const ca = button("Добавить", "primary small", () => {
+    const res = addCustomCat(ci.value);
+    if (res.error) { toast(res.error); ci.focus(); return; }
+    toast(res.existed ? "Такая категория уже есть" : "Категория «" + res.name + "» добавлена");
+    if (!res.existed) openSettings();
+  });
+  ca.style.flex = "none";
+  ci.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ca.click(); } });
+  addRow.append(ci, ca); sk.append(addRow);
+  sh.append(sk);
+
   /* Claude connection */
   const sec = el("div", "set-sec"); sec.append(el("h3", null, "Распознавание через Claude"));
   if (key) {
@@ -940,7 +1014,7 @@ async function doInstall() {
 
 async function exportData() {
   const all = await store.allReceipts();
-  const data = { app: "receipt-spending", version: 2, exportedAt: new Date().toISOString(), receipts: all, rules: rules() };
+  const data = { app: "receipt-spending", version: 2, exportedAt: new Date().toISOString(), receipts: all, rules: rules(), customCats: customCats() };
   const fileName = "traty-" + isoDay(new Date()) + ".json";
   if (isNative()) {
     try { await shareTextFile(fileName, JSON.stringify(data, null, 2)); }
@@ -962,6 +1036,7 @@ $("#importInput").onchange = async e => {
     const list = Array.isArray(data.receipts) ? data.receipts : [];
     let n = 0;
     for (const r of list) { if (r && r.id) { await store.putReceipt(Object.assign({}, r, { status: r.status === "parsing" ? "pending" : r.status })); n++; } }
+    if (Array.isArray(data.customCats)) data.customCats.forEach(c => addCustomCat(c));
     if (data.rules && typeof data.rules === "object") LS.set("rules", JSON.stringify(Object.assign({}, data.rules, rules())));
     toast("Восстановлено записей: " + n); closeSheet(); reload();
   } catch (_) { toast("Этот файл не похож на копию приложения."); }

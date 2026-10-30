@@ -193,3 +193,6 @@ a{color:var(--accent)}
 .cand{margin-top:8px;padding:12px;border-radius:12px;background:var(--surface);border:1px solid var(--line)}
 .cand .small-print{margin-top:4px;overflow-wrap:anywhere}
 .f select:disabled{opacity:.5}
+.cat-row{cursor:default}
+.cat-row .btn{padding:5px 10px;font-size:12.5px}
+.newcat input{flex:1;min-width:0;border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:10px}
