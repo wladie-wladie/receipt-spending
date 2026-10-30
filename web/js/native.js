@@ -50,7 +50,7 @@ let readyBundle = null;
 let checking = null;
 let onReady = null;
 const status = { state: "idle", detail: "", at: null };
-const setStatus = (state, detail) => { status.state = state; status.detail = detail || ""; status.at = new Date(); };
+const setStatus = (state, detail) => { status.apk = false; status.state = state; status.detail = detail || ""; status.at = new Date(); };
 
 export const appVersion = () => APP_VERSION;
 export const updateStatus = () => Object.assign({}, status, { ready: !!readyBundle });
@@ -76,13 +76,15 @@ async function check() {
         const list = await updater.list();
         bundle = (list.bundles || []).find(b => b.version === info.version && b.status !== "error") || null;
       } catch (_) {}
-      if (!bundle) bundle = await updater.download({ url: info.url, version: info.version });
+      // The update module refuses files without a SHA-256 checksum to check them against.
+      if (!bundle) bundle = await updater.download({ url: info.url, version: info.version, checksum: info.checksum || "" });
       await updater.next({ id: bundle.id });
       readyBundle = bundle;
       setStatus("ready", info.version);
       onReady && onReady(info);
     } catch (e) {
-      setStatus("error", "Не удалось скачать обновление (" + ((e && e.message) || e) + ")");
+      setStatus("error", "Не удалось скачать обновление (" + ((e && e.message) || e) + "). Можно установить свежий APK вручную.");
+      status.apk = true;
     } finally { checking = null; }
     return status;
   })();

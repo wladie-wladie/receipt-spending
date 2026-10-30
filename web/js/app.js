@@ -999,6 +999,7 @@ function openSettings() {
       if (st.state === "ready") openSettings();
     });
     bu.append(chk);
+    if (updateStatus().apk) bu.append(link("Скачать APK", APK_URL + "?v=" + Date.now(), "small"));
     if (updateStatus().ready) bu.append(button("Перезапустить", "small primary", () => applyUpdateNow().catch(() => toast("Не удалось перезапустить. Закройте и откройте приложение."))));
     su.append(line, bu);
   }

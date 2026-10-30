@@ -39,9 +39,11 @@ jobs:
           mkdir -p _site/updates
           cp -r www/. _site/
           (cd www && zip -qr "../_site/updates/bundle-${APP_VERSION}.zip" .)
+          SUM=$(sha256sum "_site/updates/bundle-${APP_VERSION}.zip" | cut -d' ' -f1)
           cat > _site/update.json <<JSON
-          {"version":"${APP_VERSION}","url":"https://wladie-wladie.github.io/receipt-spending/updates/bundle-${APP_VERSION}.zip","builtAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+          {"version":"${APP_VERSION}","url":"https://wladie-wladie.github.io/receipt-spending/updates/bundle-${APP_VERSION}.zip","checksum":"${SUM}","builtAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
           JSON
+          cat _site/update.json
           touch _site/.nojekyll
       - name: Положить APK на сайт
         uses: actions/download-artifact@v4
