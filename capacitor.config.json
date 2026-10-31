@@ -10,6 +10,10 @@
       "autoUpdate": false,
       "statsUrl": "",
       "appReadyTimeout": 10000
+    },
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_receipt",
+      "iconColor": "#1D6B57"
     }
   }
 }

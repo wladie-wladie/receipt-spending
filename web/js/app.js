@@ -1,6 +1,7 @@
 import * as store from "./db.js";
 import { CATS, MODELS, checkKey, recognizeWithClaude, recognizeFree, unitPrice, classifyOperations } from "./recognize.js";
-import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion, checkForUpdates, updateStatus } from "./native.js";
+import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion, checkForUpdates, updateStatus, shareImageFile, notificationsAvailable, scheduleReportNotification, onReportNotificationTap } from "./native.js";
+import { buildReport, drawReport, monthName, monthIn } from "./report.js";
 import * as bank from "./bank.js";
 
 const { SPEND_CATS, INCOME_CAT } = bank;
@@ -180,6 +181,12 @@ function renderBanner() {
   if (updateInfo) {
     banner("Загружена новая версия", "Она включится сама при следующем запуске, или можно перезапустить сейчас.",
       [button("Перезапустить", "small primary", () => applyUpdateNow().catch(() => toast("Не удалось обновить. Перезапустите приложение."))), button("Позже", "small ghost", () => { updateInfo = null; render(); })]);
+    return;
+  }
+  const pr = prevMonthReport();
+  if (pr) {
+    banner("Отчёт за " + monthName(pr.m).toLowerCase() + " готов", "Сколько ушло, на что и что изменилось по сравнению с прошлым месяцем. Отчётом можно поделиться.",
+      [button("Открыть", "small primary", () => openReport(pr.y, pr.m)), button("Позже", "small ghost", () => { LS.set("reportSeen", pr.key); render(); })]);
     return;
   }
   if (bank.bankAvailable() && bankState.candidates.length) {
@@ -405,6 +412,7 @@ function setTab(t) {
 $("#tab-spend").onclick = () => setTab("spend");
 $("#tab-stats").onclick = () => setTab("stats");
 $("#st-all").onclick = () => { statsView = "all"; render(); };
+$("#openReport").onclick = () => openReport(ym.y, ym.m);
 $("#st-food").onclick = () => { statsView = "food"; render(); };
 $("#prev").onclick = () => { ym.m--; if (ym.m < 0) { ym.m = 11; ym.y--; } render(); };
 $("#next").onclick = () => { ym.m++; if (ym.m > 11) { ym.m = 0; ym.y++; } render(); };
@@ -770,6 +778,71 @@ async function openReceipt(id) {
   b2.append(save, del); sh.append(b2);
 }
 
+/* ---------- monthly report ---------- */
+const reportHelpers = () => ({ spendCat, rTotal, rKind, rName, rCur, rDate, norm: bank.normMerchant, currency: currencyCode(), symbol: cur(), fmt: v => fmt(v), money, plural });
+function prevMonthReport() {
+  const d = new Date();
+  if (d.getDate() > 10) return null;
+  const y = d.getMonth() === 0 ? d.getFullYear() - 1 : d.getFullYear(), m = d.getMonth() === 0 ? 11 : d.getMonth() - 1;
+  const key = y + "-" + pad(m + 1);
+  if (LS.get("reportSeen", "") === key) return null;
+  if (!records.some(r => rDate(r).slice(0, 7) === key && rKind(r) === "expense")) return null;
+  return { y, m, key };
+}
+async function openReport(y, m) {
+  openId = null;
+  const key = y + "-" + pad(m + 1);
+  const sh = sheetStart("Отчёт · " + monthName(m) + " " + y, "report");
+  const R = buildReport(records, y, m, reportHelpers());
+  if (!R.count) { sh.append(el("p", "small-print", "В этом месяце ещё нет трат, отчёт строить не из чего.")); return; }
+  const wait = el("div", "note ok"); wait.append(el("span", "spin"), "Готовлю отчёт…"); sh.append(wait);
+  let canvas;
+  try { canvas = await drawReport(R, reportHelpers()); }
+  catch (_) { wait.remove(); sh.append(el("div", "note", "Не удалось построить отчёт.")); return; }
+  if (sheetMode !== "report") return;
+  wait.remove();
+  LS.set("reportSeen", key); renderBanner();
+  const img = el("img", "report-img"); img.src = canvas.toDataURL("image/png"); img.alt = "Отчёт за " + monthName(m).toLowerCase() + " " + y;
+  sh.append(img);
+  const fileName = "traty-otchet-" + key + ".png";
+  const title = "Мои траты в " + monthIn(m) + " " + y;
+  const b = el("div", "btns sticky-btns");
+  const share = button("Поделиться", "primary", async () => {
+    share.disabled = true;
+    try {
+      if (isNative()) await shareImageFile(fileName, img.src.split(",")[1], title);
+      else {
+        const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
+        const file = new File([blob], fileName, { type: "image/png" });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title });
+        else { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = fileName; document.body.append(a); a.click(); a.remove(); toast("Картинка отчёта сохранена"); }
+      }
+    } catch (e) { if (!/cancel|abort/i.test(String(e && (e.message || e.name)))) toast("Не удалось поделиться отчётом."); }
+    share.disabled = false;
+  });
+  b.append(share);
+  sh.append(b);
+}
+async function planReportNotification() {
+  if (!notificationsAvailable() || !records.length) return;
+  const d = new Date();
+  const at = new Date(d.getFullYear(), d.getMonth() + 1, 1, 10, 0, 0);
+  const key = d.getFullYear() + "-" + pad(d.getMonth() + 1);
+  try {
+    const res = await scheduleReportNotification({
+      at, title: "Отчёт за " + monthName(d.getMonth()).toLowerCase() + " готов",
+      body: "Сколько ушло, на что и что изменилось за месяц. Отчётом можно поделиться.",
+      extra: { report: key }, mayAsk: LS.get("notifAsked") !== "1",
+    });
+    LS.set("notifAsked", "1");
+    return res;
+  } catch (_) {}
+}
+onReportNotificationTap(extra => {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(extra.report || ""));
+  if (m) openReport(Number(m[1]), Number(m[2]) - 1);
+});
+
 /* ---------- manual entry ---------- */
 $("#addManual").onclick = () => {
   openId = null;
@@ -1079,4 +1152,4 @@ document.addEventListener("visibilitychange", () => { if (document.visibilitySta
 if (bank.bankAvailable()) bank.onBankNotification(() => importBank());
 
 initUpdates(info => { updateInfo = info; render(); });
-reload().then(onResume).then(classifyNew);
+reload().then(onResume).then(classifyNew).then(planReportNotification);

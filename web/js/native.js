@@ -105,3 +105,29 @@ export async function applyUpdateNow() {
   if (!readyBundle) return;
   await plugin("CapacitorUpdater").set({ id: readyBundle.id });
 }
+
+/* ---------- sharing a picture ---------- */
+export async function shareImageFile(fileName, base64, title) {
+  const written = await plugin("Filesystem").writeFile({ path: fileName, data: base64, directory: "CACHE" });
+  await plugin("Share").share({ title, files: [written.uri], dialogTitle: "Поделиться отчётом" });
+}
+
+/* ---------- monthly report reminder (APK with the notifications module only) ---------- */
+const REPORT_NOTIFICATION_ID = 7001;
+export const notificationsAvailable = () => isNative() && !!(cap() && cap().isPluginAvailable && cap().isPluginAvailable("LocalNotifications"));
+
+/** Plans the "report is ready" notification; replaces the previously planned one. */
+export async function scheduleReportNotification({ at, title, body, extra, mayAsk }) {
+  if (!notificationsAvailable()) return "unavailable";
+  const ln = plugin("LocalNotifications");
+  let perm = await ln.checkPermissions();
+  if (perm.display !== "granted" && mayAsk) perm = await ln.requestPermissions();
+  if (perm.display !== "granted") return "denied";
+  try { await ln.cancel({ notifications: [{ id: REPORT_NOTIFICATION_ID }] }); } catch (_) {}
+  await ln.schedule({ notifications: [{ id: REPORT_NOTIFICATION_ID, title, body, extra, schedule: { at, allowWhileIdle: true } }] });
+  return "scheduled";
+}
+export function onReportNotificationTap(fn) {
+  if (!notificationsAvailable()) return;
+  try { plugin("LocalNotifications").addListener("localNotificationActionPerformed", e => fn((e && e.notification && e.notification.extra) || {})); } catch (_) {}
+}
