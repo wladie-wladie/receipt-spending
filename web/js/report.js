@@ -41,12 +41,12 @@ export function buildReport(records, y, m, h) {
   const biggest = exp.slice().sort((a, b) => h.rTotal(b) - h.rTotal(a))[0] || null;
 
   const items = {};
-  exp.forEach(r => (r.items || []).forEach(i => {
+  exp.forEach(r => { const f = h.factor ? h.factor(r) : 1; (r.items || []).forEach(i => {
     const k = String(i.generic || i.name || "").trim().toLowerCase();
     if (!k || k === "скидка" || !(Number(i.price) > 0)) return;
     const o = items[k] = items[k] || { name: i.generic || i.name, sum: 0, count: 0 };
-    o.sum += Number(i.price); o.count++;
-  }));
+    o.sum += Number(i.price) * f; o.count++;
+  }); });
   const topItems = Object.values(items).sort((a, b) => b.sum - a.sum).slice(0, 3);
 
   // A few plain-language observations.

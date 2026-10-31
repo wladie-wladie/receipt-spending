@@ -3,6 +3,7 @@ import { CATS, MODELS, checkKey, recognizeWithClaude, recognizeFree, unitPrice, 
 import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion, checkForUpdates, updateStatus, shareImageFile, notificationsAvailable, scheduleReportNotification, onReportNotificationTap } from "./native.js";
 import { buildReport, drawReport, monthName, monthIn } from "./report.js";
 import * as bank from "./bank.js";
+import { convert } from "./fx.js";
 
 const { SPEND_CATS, INCOME_CAT } = bank;
 const NEW_CAT = "__new__";
@@ -62,6 +63,44 @@ const symbolOf = code => CURRENCIES[code] || code || "";
 const cur = () => symbolOf(currencyCode());
 const rCur = r => r.currency || currencyCode();
 const fmt = (v, code) => money(v) + " " + symbolOf(code || currencyCode());
+const currencyOptions = () => Object.entries(CURRENCIES).map(([code, s]) => [code, s + "  " + code]);
+
+/* ---------- other currencies, converted into the main one at the rate of the day ---------- */
+function fxOf(r) {
+  const main = currencyCode();
+  const f = r.fx && r.fx[main];
+  return f && f.from === rCur(r) && Math.abs(f.src - rTotal(r)) < 0.005 && f.date === rDate(r) ? f : null;
+}
+/** Amount in the main currency, or null while the rate is not known yet. */
+function amtMain(r) { if (rCur(r) === currencyCode()) return rTotal(r); const f = fxOf(r); return f ? f.amount : null; }
+const inMain = r => amtMain(r) != null;
+const mainAmt = r => amtMain(r) || 0;
+/** Multiplier for item prices of a receipt in another currency. */
+const fxFactor = r => { const t = rTotal(r); return t ? mainAmt(r) / t : 1; };
+const isForeign = r => rCur(r) !== currencyCode();
+/** "12,00 $" or, for a foreign operation, "≈ 32,10 ₾". */
+const amountLabel = r => isForeign(r) && inMain(r) ? "≈ " + fmt(mainAmt(r)) : fmt(rTotal(r), rCur(r));
+
+let fxRunning = false;
+const fxFailed = new Set();
+async function ensureFx() {
+  if (fxRunning) return;
+  const main = currencyCode();
+  const todo = records.filter(r => isForeign(r) && rTotal(r) > 0 && !fxOf(r) && !fxFailed.has(r.id + main + rCur(r) + rTotal(r)));
+  if (!todo.length) return;
+  fxRunning = true;
+  let changed = false;
+  try {
+    for (const r of todo) {
+      const c = await convert(rTotal(r), rCur(r), main, rDate(r));
+      if (!c) { fxFailed.add(r.id + main + rCur(r) + rTotal(r)); continue; }
+      const fx = Object.assign({}, r.fx || {}, { [main]: { amount: c.amount, rate: c.rate, rateDate: c.rateDate, src: rTotal(r), from: rCur(r), date: rDate(r) } });
+      await store.updateReceipt(r.id, { fx });
+      changed = true;
+    }
+  } finally { fxRunning = false; }
+  if (changed) { records = await store.allReceipts(); render(); if (openId) { const id = openId; openReceipt(id); } }
+}
 
 /* ---------- state ---------- */
 let records = [];
@@ -74,7 +113,7 @@ let installEvent = null;
 let updateInfo = null;
 let bankState = { enabled: false, watched: [], candidates: [] };
 
-async function reload() { records = await store.allReceipts(); render(); }
+async function reload() { records = await store.allReceipts(); render(); ensureFx(); }
 
 /* ---------- toast ---------- */
 let tt;
@@ -222,8 +261,8 @@ function renderSpend(list) {
   const main = currencyCode();
   const expenses = list.filter(r => rKind(r) === "expense");
   const incomes = list.filter(r => rKind(r) === "income");
-  const mainExp = expenses.filter(r => rCur(r) === main);
-  const total = mainExp.reduce((s, r) => s + rTotal(r), 0);
+  const mainExp = expenses.filter(inMain);
+  const total = mainExp.reduce((s, r) => s + mainAmt(r), 0);
   const tEl = $("#total"); tEl.textContent = money(total); tEl.append(el("small", null, cur()));
   const st = $("#stats"); st.innerHTML = "";
   const add = (b, t) => { const s = el("span"); s.append(el("b", null, b), " " + t); st.append(s); };
@@ -232,9 +271,10 @@ function renderSpend(list) {
   const dayCount = isCur ? new Date().getDate() : new Date(ym.y, ym.m + 1, 0).getDate();
   if (mainExp.length) add(fmt(total / dayCount), "в день");
   const other = {};
-  expenses.filter(r => rCur(r) !== main).forEach(r => { other[rCur(r)] = (other[rCur(r)] || 0) + rTotal(r); });
-  Object.entries(other).forEach(([c, v]) => add("+" + fmt(v, c), "в другой валюте"));
-  const inc = incomes.filter(r => rCur(r) === main).reduce((s, r) => s + rTotal(r), 0);
+  expenses.filter(r => !inMain(r)).forEach(r => { other[rCur(r)] = (other[rCur(r)] || 0) + rTotal(r); });
+  Object.entries(other).forEach(([c, v]) => add("+" + fmt(v, c), "ещё не пересчитано (нет курса)"));
+  if (mainExp.some(isForeign)) add(String(mainExp.filter(isForeign).length), "в другой валюте, пересчитаны по курсу");
+  const inc = incomes.filter(inMain).reduce((s, r) => s + mainAmt(r), 0);
   if (inc) add("+" + fmt(inc), "поступило");
   const pending = list.filter(needsParse).length;
   if (pending) add(String(pending), "ждут разбора");
@@ -251,7 +291,7 @@ function renderSpend(list) {
   Object.keys(groups).sort().reverse().forEach(d => {
     const g = groups[d].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
     const sec = el("div", "day"); const h = el("div", "dayhead");
-    const dayExp = g.filter(r => rKind(r) === "expense" && rCur(r) === main).reduce((s, r) => s + rTotal(r), 0);
+    const dayExp = g.filter(r => rKind(r) === "expense" && inMain(r)).reduce((s, r) => s + mainAmt(r), 0);
     h.append(el("b", null, dayLabel(d)), el("span", "num", fmt(dayExp)));
     const rows = el("div", "rows"); g.forEach(r => rows.append(rowEl(r)));
     sec.append(h, rows); box.append(sec);
@@ -274,7 +314,7 @@ function renderInbox(box) {
     t.append(el("div", "rname", rName(r)));
     const when = new Date(r.createdAt);
     t.append(el("div", "rsub", (r.bankApp || "Банк") + " · " + (rDate(r) === isoDay(new Date()) ? "" : dayLabel(rDate(r)) + ", ") + hhmm(when)));
-    top.append(t, el("div", "ramt" + (rKind(r) === "income" ? " income" : ""), (rKind(r) === "income" ? "+" : "") + fmt(rTotal(r), rCur(r))));
+    top.append(t, el("div", "ramt" + (rKind(r) === "income" ? " income" : ""), (rKind(r) === "income" ? "+" : "") + amountLabel(r)));
     const chips = el("div", "chips");
     const opts = [];
     if (r.category) opts.push(r.category);
@@ -323,9 +363,10 @@ function rowEl(r) {
   const it = r.items || [];
   if (it.length) bits.push(it.length + " " + plural(it.length, "позиция", "позиции", "позиций"));
   if (r.source === "bank") bits.push(r.photo ? "банк + чек" : "банк");
+  if (isForeign(r)) bits.push(fmt(rTotal(r), rCur(r)));
   sub.append(bits.join(" · "));
   m.append(sub); b.append(m);
-  const amt = r.status === "parsing" && r.total == null ? "…" : (rKind(r) === "income" ? "+" : "") + fmt(rTotal(r), rCur(r));
+  const amt = r.status === "parsing" && r.total == null ? "…" : (rKind(r) === "income" ? "+" : "") + amountLabel(r);
   b.append(el("div", "ramt" + (rKind(r) === "income" ? " income" : ""), amt));
   return b;
 }
@@ -362,17 +403,17 @@ function renderStats(list) {
   $("#st-food").setAttribute("aria-pressed", String(statsView === "food"));
   $("#stats-all").hidden = statsView !== "all"; $("#stats-food").hidden = statsView !== "food";
   const main = currencyCode();
-  const exp = list.filter(r => rKind(r) === "expense" && rCur(r) === main);
+  const exp = list.filter(r => rKind(r) === "expense" && inMain(r));
   if (statsView === "all") {
     const byCat = {};
-    exp.forEach(r => { const c = spendCat(r); byCat[c] = (byCat[c] || 0) + rTotal(r); });
+    exp.forEach(r => { const c = spendCat(r); byCat[c] = (byCat[c] || 0) + mainAmt(r); });
     // Groceries and eating out share one bar: together they are "food", split by colour.
     const entries = Object.entries(byCat).filter(([k]) => k !== "Продукты" && k !== "Кафе и рестораны");
     const food = [["Продукты", byCat["Продукты"] || 0], ["Кафе и рестораны", byCat["Кафе и рестораны"] || 0]].filter(([, v]) => v > 0.004);
     if (food.length) entries.push([food.length > 1 ? "Еда" : food[0][0], food.reduce((a, [, v]) => a + v, 0), food.length > 1 ? food : null]);
     bars($("#spendCats"), entries, "Здесь появится разбивка, когда в месяце будут траты.");
     const places = {};
-    exp.forEach(r => { const k = bank.normMerchant(rName(r)) || rName(r); const o = places[k] = places[k] || { name: rName(r), sum: 0, count: 0 }; o.sum += rTotal(r); o.count++; });
+    exp.forEach(r => { const k = bank.normMerchant(rName(r)) || rName(r); const o = places[k] = places[k] || { name: rName(r), sum: 0, count: 0 }; o.sum += mainAmt(r); o.count++; });
     fillTop($("#topPlaces"), Object.values(places).sort((a, b) => b.sum - a.sum).slice(0, 8), o => fmt(o.sum), o => o.count > 1 ? "×" + o.count : "");
     return;
   }
@@ -380,17 +421,18 @@ function renderStats(list) {
   exp.forEach(r => {
     const its = r.items || [];
     if (!its.length) return;
+    const k = fxFactor(r);
     its.forEach(i => {
       const c = CATS.includes(i.category) ? i.category : "Другое";
-      cats[c] = (cats[c] || 0) + num(i.price);
+      cats[c] = (cats[c] || 0) + num(i.price) * k;
       const key = (i.generic || i.name || "").trim().toLowerCase();
       if (!key || key === "скидка") return;
       const o = items[key] = items[key] || { name: i.generic || i.name, sum: 0, count: 0 };
-      o.sum += num(i.price); o.count += 1;
+      o.sum += num(i.price) * k; o.count += 1;
     });
   });
   const food = exp.filter(r => spendCat(r) === "Продукты");
-  const noItems = food.filter(r => !(r.items || []).length).reduce((s, r) => s + rTotal(r), 0);
+  const noItems = food.filter(r => !(r.items || []).length).reduce((s, r) => s + mainAmt(r), 0);
   if (noItems) cats["Без чека"] = noItems;
   bars($("#cats"), Object.entries(cats), "Здесь появится разбивка продуктов, когда будут чеки.");
   const arr = Object.values(items);
@@ -703,8 +745,15 @@ async function openReceipt(id) {
   let fCat = catSelect("e-cat", catOptions(), rKind(r) === "income" ? INCOME_CAT : spendCat(r));
   const catField = field("Категория", fCat, true);
   fKind.onchange = () => { const n = catSelect("e-cat", catOptions(), fKind.value === "income" ? INCOME_CAT : spendCat(r)); fCat.replaceWith(n); fCat = n; };
-  fs.append(field("Место или получатель", fStore, true), field("Дата", fDate), field("Сумма, " + symbolOf(rCur(r)), fTotal), catField, field("Тип", fKind, true));
+  const fCur = select("e-cur", currencyOptions(), rCur(r));
+  fs.append(field("Место или получатель", fStore, true), field("Сумма", fTotal), field("Валюта", fCur), field("Дата", fDate), catField, field("Тип", fKind, true));
   sh.append(fs);
+  if (isForeign(r)) {
+    const f = fxOf(r);
+    sh.append(el("p", "small-print fx-note", f
+      ? "≈ " + fmt(f.amount) + " по курсу на " + f.rateDate.split("-").reverse().join(".") + ": 1 " + symbolOf(rCur(r)) + " = " + money(f.rate) + " " + cur() + ". В итогах учитывается эта сумма."
+      : "Пересчёт в " + currencyCode() + " появится, когда будет связь с интернетом: курс берётся на дату операции."));
+  }
 
   const items = (r.items || []).map(i => Object.assign({}, i));
   const paper = el("div", "paper");
@@ -756,7 +805,7 @@ async function openReceipt(id) {
       return it;
     });
     const name = fStore.value.trim();
-    const patch = { date: fDate.value || rDate(r), total: fTotal.value.trim() === "" ? null : r2(fTotal.value), kind: fKind.value, category: fCat.value };
+    const patch = { date: fDate.value || rDate(r), total: fTotal.value.trim() === "" ? null : r2(fTotal.value), kind: fKind.value, category: fCat.value, currency: fCur.value };
     if (r.source === "bank") patch.merchant = name; else patch.store = name;
     if (showItems) patch.items = clean;
     if (!busy && clean.length && r.photo) patch.status = "parsed";
@@ -779,7 +828,7 @@ async function openReceipt(id) {
 }
 
 /* ---------- monthly report ---------- */
-const reportHelpers = () => ({ spendCat, rTotal, rKind, rName, rCur, rDate, norm: bank.normMerchant, currency: currencyCode(), symbol: cur(), fmt: v => fmt(v), money, plural });
+const reportHelpers = () => ({ spendCat, rTotal: mainAmt, rKind, rName, rCur: r => inMain(r) ? currencyCode() : rCur(r), rDate, norm: bank.normMerchant, currency: currencyCode(), symbol: cur(), fmt: v => fmt(v), money, plural, factor: fxFactor });
 function prevMonthReport() {
   const d = new Date();
   if (d.getDate() > 10) return null;
@@ -854,7 +903,8 @@ $("#addManual").onclick = () => {
   const fDate = inp("m-date", "date", isoDay(new Date()));
   const fKind = select("m-kind", [["expense", "Расход"], ["income", "Поступление"]], "expense");
   fKind.onchange = () => { fCat.disabled = fKind.value === "income"; };
-  fs.append(field("Сумма, " + cur(), fSum), field("Дата", fDate), field("Категория", fCat, true), field("Где или что", fStore, true), field("Тип", fKind, true));
+  const fCur = select("m-cur", currencyOptions(), currencyCode());
+  fs.append(field("Сумма", fSum), field("Валюта", fCur), field("Дата", fDate), field("Тип", fKind), field("Категория", fCat, true), field("Где или что", fStore, true));
   sh.append(fs);
   const b = el("div", "btns");
   const save = button("Добавить", "primary", async () => {
@@ -863,7 +913,7 @@ $("#addManual").onclick = () => {
     const nowIso = new Date().toISOString();
     const income = fKind.value === "income";
     await store.putReceipt({ id: store.uid(), createdAt: nowIso, updatedAt: nowIso, date: fDate.value || isoDay(new Date()), photo: null, status: "manual", source: "manual",
-      kind: income ? "income" : "expense", category: income ? INCOME_CAT : fCat.value, store: fStore.value.trim(), total: s, currency: currencyCode(), items: [] });
+      kind: income ? "income" : "expense", category: income ? INCOME_CAT : fCat.value, store: fStore.value.trim(), total: s, currency: fCur.value, items: [] });
     if (!income && fStore.value.trim()) learnRule(fStore.value.trim(), fCat.value);
     toast("Добавлено"); closeSheet(); reload();
   });
@@ -1053,10 +1103,10 @@ function openSettings() {
   /* currency */
   const sc = el("div", "set-sec"); sc.append(el("h3", null, "Основная валюта"));
   const curF = el("div", "f");
-  const curSel = select("currency", Object.entries(CURRENCIES).map(([code, s]) => [code, s + "  " + code]), currencyCode());
-  curSel.onchange = () => { LS.set("currency", curSel.value); render(); toast("Валюта: " + curSel.value); };
+  const curSel = select("currency", currencyOptions(), currencyCode());
+  curSel.onchange = () => { LS.set("currency", curSel.value); render(); ensureFx(); toast("Основная валюта: " + curSel.value + ". Остальные пересчитываются по курсу."); };
   curF.append(curSel);
-  sc.append(curF, el("p", "small-print", "По умолчанию определяется по вашим тратам. Траты в других валютах показываются отдельно."));
+  sc.append(curF, el("p", "small-print", "Все итоги, аналитика и отчёты считаются в ней. Траты и переводы в других валютах пересчитываются по курсу на дату операции."));
   sh.append(sc);
 
   /* data */
