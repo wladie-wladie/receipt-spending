@@ -1,7 +1,7 @@
 /* Layout: one-screen mobile app — month header, scrolling list, fixed bottom bar with a central camera button */
 :root{
   --bg:#EEF2F0; --surface:#FFFFFF; --ink:#15201C; --muted:#5B6A64; --line:#D7DFDB;
-  --accent:#1D6B57; --accent-ink:#FFFFFF; --accent-soft:#DDEDE7; --warn:#9A5B00; --warn-soft:#FBEBCF; --danger:#B3261E;
+  --accent:#1D6B57; --accent-ink:#FFFFFF; --accent-soft:#DDEDE7; --accent-2:#C98A2B; --warn:#9A5B00; --warn-soft:#FBEBCF; --danger:#B3261E;
   --f-display:"Unbounded","Golos Text",system-ui,sans-serif;
   --f-body:"Golos Text",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   --f-mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;
@@ -13,7 +13,7 @@
 }
 @media (prefers-color-scheme: dark){:root{
   --bg:#0E1412; --surface:#17201C; --ink:#E4EBE8; --muted:#92A29B; --line:#2A3531;
-  --accent:#5BC3A4; --accent-ink:#06231B; --accent-soft:#1C3A31; --warn:#F0B45A; --warn-soft:#3A2C14; --danger:#F2867E; color-scheme:dark}}
+  --accent:#5BC3A4; --accent-ink:#06231B; --accent-soft:#1C3A31; --accent-2:#E3AE5E; --warn:#F0B45A; --warn-soft:#3A2C14; --danger:#F2867E; color-scheme:dark}}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 html,body{margin:0;min-height:100%}
@@ -82,6 +82,15 @@ a{color:var(--accent)}
 .bar{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;margin-top:10px;font-size:13.5px}
 .bar .track{grid-column:1/-1;height:8px;border-radius:4px;background:var(--accent-soft);overflow:hidden}
 .bar .fill{height:100%;background:var(--accent);border-radius:4px}
+.bar .track.stacked{display:flex;gap:2px;background:var(--accent-soft)}
+.bar .track.stacked .fill{border-radius:0;flex:none}
+.bar .track.stacked .fill:first-child{border-radius:4px 0 0 4px}
+.bar .track.stacked .fill:last-child{border-radius:0 4px 4px 0}
+.bar .part1{background:var(--accent-2)}
+.bar-legend{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:2px 14px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.bar-legend .lg{display:inline-flex;align-items:center;gap:6px}
+.bar-legend .dot{width:8px;height:8px;border-radius:2px;background:var(--accent);display:inline-block}
+.bar-legend .dot.part1{background:var(--accent-2)}
 .bar .pct{color:var(--muted);font-size:12px;margin-left:6px}
 .top-items{list-style:none;margin:0;padding:0;font-size:13.5px}
 .top-items li{display:flex;gap:8px;align-items:baseline;padding:6px 0;border-top:1px dashed var(--line)}

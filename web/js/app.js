@@ -324,17 +324,30 @@ function rowEl(r) {
 }
 
 /* ---------- analytics ---------- */
+/** Horizontal bars. An entry may carry parts: [[name, value], ...] drawn as coloured segments of one bar. */
 function bars(container, entries, emptyText) {
   container.innerHTML = "";
   entries = entries.filter(([, v]) => v > 0.004).sort((a, b) => b[1] - a[1]);
   if (!entries.length) { container.append(el("p", "hint", emptyText)); return; }
   const total = entries.reduce((a, [, v]) => a + v, 0);
   const max = entries[0][1];
-  entries.forEach(([k, v]) => {
+  entries.forEach(([k, v, parts]) => {
     const row = el("div", "bar");
     const r = el("span", "num", fmt(v)); r.append(el("span", "pct", Math.round(v / total * 100) + "%"));
-    const tr = el("div", "track"); const f = el("div", "fill"); f.style.width = Math.max(2, v / max * 100) + "%"; tr.append(f);
-    row.append(el("span", null, k), r, tr); container.append(row);
+    const tr = el("div", "track");
+    if (parts && parts.length > 1) {
+      tr.classList.add("stacked");
+      const legend = el("div", "bar-legend");
+      parts.forEach(([name, pv], i) => {
+        const f = el("div", "fill part" + i); f.style.width = (pv / max * 100) + "%"; f.title = name + ": " + fmt(pv); tr.append(f);
+        const li = el("span", "lg"); li.append(el("i", "dot part" + i), name + " " + fmt(pv)); legend.append(li);
+      });
+      row.append(el("span", null, k), r, tr, legend);
+    } else {
+      const f = el("div", "fill"); f.style.width = Math.max(2, v / max * 100) + "%"; tr.append(f);
+      row.append(el("span", null, k), r, tr);
+    }
+    container.append(row);
   });
 }
 function renderStats(list) {
@@ -346,7 +359,11 @@ function renderStats(list) {
   if (statsView === "all") {
     const byCat = {};
     exp.forEach(r => { const c = spendCat(r); byCat[c] = (byCat[c] || 0) + rTotal(r); });
-    bars($("#spendCats"), Object.entries(byCat), "Здесь появится разбивка, когда в месяце будут траты.");
+    // Groceries and eating out share one bar: together they are "food", split by colour.
+    const entries = Object.entries(byCat).filter(([k]) => k !== "Продукты" && k !== "Кафе и рестораны");
+    const food = [["Продукты", byCat["Продукты"] || 0], ["Кафе и рестораны", byCat["Кафе и рестораны"] || 0]].filter(([, v]) => v > 0.004);
+    if (food.length) entries.push([food.length > 1 ? "Еда" : food[0][0], food.reduce((a, [, v]) => a + v, 0), food.length > 1 ? food : null]);
+    bars($("#spendCats"), entries, "Здесь появится разбивка, когда в месяце будут траты.");
     const places = {};
     exp.forEach(r => { const k = bank.normMerchant(rName(r)) || rName(r); const o = places[k] = places[k] || { name: rName(r), sum: 0, count: 0 }; o.sum += rTotal(r); o.count++; });
     fillTop($("#topPlaces"), Object.values(places).sort((a, b) => b.sum - a.sum).slice(0, 8), o => fmt(o.sum), o => o.count > 1 ? "×" + o.count : "");
