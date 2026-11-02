@@ -1,6 +1,6 @@
 import * as store from "./db.js";
 import { CATS, MODELS, checkKey, recognizeWithClaude, recognizeFree, unitPrice, classifyOperations } from "./recognize.js";
-import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion, checkForUpdates, updateStatus, shareImageFile, notificationsAvailable, scheduleReportNotification, onReportNotificationTap } from "./native.js";
+import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion, checkForUpdates, updateStatus, shareImageFile, notificationsAvailable, scheduleReportNotification, onReportNotificationTap, onBackButton } from "./native.js";
 import { buildReport, drawReport, monthName, monthIn } from "./report.js";
 import * as bank from "./bank.js";
 import { convert } from "./fx.js";
@@ -1403,6 +1403,23 @@ window.addEventListener("appinstalled", () => { installEvent = null; toast("Пр
 if (!isNative() && "serviceWorker" in navigator) {
   window.addEventListener("load", () => { navigator.serviceWorker.register("sw.js").catch(() => {}); });
 }
+
+/* ---------- Android "Back": close what is open, then go to the main screen, then leave ---------- */
+function goBack() {
+  const t = $("#toast"); if (t && !t.hidden) t.hidden = true;
+  if (!$("#overlay").hidden) {
+    const inline = document.querySelector("#sheet .newcat");
+    if (inline) { inline.remove(); return true; }
+    const full = document.querySelector("#sheet .photo.full");
+    if (full) { full.classList.remove("full"); return true; }
+    closeSheet(); return true;
+  }
+  if (tab !== "spend") { setTab("spend"); window.scrollTo(0, 0); return true; }
+  const d = new Date();
+  if (ym.y !== d.getFullYear() || ym.m !== d.getMonth()) { ym.y = d.getFullYear(); ym.m = d.getMonth(); render(); window.scrollTo(0, 0); return true; }
+  return false;
+}
+onBackButton(goBack);
 
 /* ---------- start ---------- */
 async function onResume() {

@@ -131,3 +131,11 @@ export function onReportNotificationTap(fn) {
   if (!notificationsAvailable()) return;
   try { plugin("LocalNotifications").addListener("localNotificationActionPerformed", e => fn((e && e.notification && e.notification.extra) || {})); } catch (_) {}
 }
+
+/* ---------- Android back button ---------- */
+/** handler() returns true when it closed something inside the app; otherwise the app exits. */
+export function onBackButton(handler) {
+  if (!isNative() || !(cap().isPluginAvailable && cap().isPluginAvailable("App"))) return;
+  const app = plugin("App");
+  app.addListener("backButton", () => { if (!handler()) app.exitApp(); });
+}
