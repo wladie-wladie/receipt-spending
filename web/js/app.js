@@ -841,6 +841,39 @@ async function openReceipt(id) {
 // Groceries and eating out are budgeted together as "Еда".
 const FOOD = "Еда", FOOD_CATS = ["Продукты", "Кафе и рестораны"];
 const foodTogether = () => LS.get("foodTogether", "1") === "1";
+// Mandatory payments (rent, utilities, subscriptions) are kept out of the daily allowance.
+const DEFAULT_FIXED = ["Жильё и коммунальные", "Связь и подписки"];
+
+/**
+ * Daily allowance for everyday spending: the budget minus mandatory payments, spread over the days left.
+ * Mandatory = categories marked in the planner plus payments the app recognised as recurring.
+ */
+function dailyAllowance(y, m) {
+  const plan = planFor(y, m);
+  if (!plan.total) return null;
+  const t = new Date(), today = isoDay(t), key = monthKey(y, m);
+  const days = new Date(y, m + 1, 0).getDate();
+  const isCur = t.getFullYear() === y && t.getMonth() === m;
+  const daysLeft = isCur ? days - t.getDate() + 1 : 0;
+  const A = analyse(savingsCtx());
+  const recurringByKey = new Map(A.recurring.filter(x => !plan.fixed.includes(x.cat)).map(x => [x.key, x]));
+  const isFixed = r => plan.fixed.includes(spendCat(r)) || recurringByKey.has(bank.normMerchant(rName(r)));
+  const month = records.filter(r => rDate(r).slice(0, 7) === key && rKind(r) === "expense" && inMain(r));
+  const fixedPaid = month.filter(isFixed).reduce((s, r) => s + mainAmt(r), 0);
+  // Expected mandatory spending: their limits, or what they usually cost, plus other recurring payments.
+  const avg = averageByCat(y, m, 3, true) || { cats: {} };
+  const limitOf = c => plan.cats[c] || 0;
+  const fixedPlanned = plan.fixed.reduce((s, c) => s + (limitOf(c) || avg.cats[c] || 0), 0) + [...recurringByKey.values()].reduce((s, x) => s + x.perMonth, 0);
+  const fixedExpected = Math.max(fixedPlanned, fixedPaid);
+  const flexBudget = Math.max(0, plan.total - fixedExpected);
+  const flex = month.filter(r => !isFixed(r));
+  const flexToday = flex.filter(r => rDate(r) === today).reduce((s, r) => s + mainAmt(r), 0);
+  const flexBefore = flex.reduce((s, r) => s + mainAmt(r), 0) - flexToday;
+  const perDay = daysLeft ? Math.max(0, flexBudget - flexBefore) / daysLeft : 0;
+  const paidThisMonth = new Set(month.filter(isFixed).map(r => bank.normMerchant(rName(r))));
+  const upcoming = A.recurring.filter(x => x.next.slice(0, 7) === key && x.next >= today && !paidThisMonth.has(x.key)).sort((a, b) => a.next.localeCompare(b.next));
+  return { perDay, left: perDay - flexToday, flexToday, flexBudget, flexSpent: flexBefore + flexToday, fixedPaid, fixedExpected, daysLeft, upcoming, fixedToday: month.filter(r => isFixed(r) && rDate(r) === today).reduce((s, r) => s + mainAmt(r), 0) };
+}
 const budgetCat = c => foodTogether() && FOOD_CATS.includes(c) ? FOOD : c;
 const budgetStore = () => LS.json("budget", { plans: {} });
 const monthKey = (y, m) => y + "-" + pad(m + 1);
@@ -859,7 +892,7 @@ function planFor(y, m) {
   }
   Object.keys(cats).forEach(k => { if (!(cats[k] > 0)) delete cats[k]; });
   const catSum = Object.values(cats).reduce((a, v) => a + v, 0);
-  return { exists: !!p, own: !!b.plans[monthKey(y, m)], income: (p && p.income) || 0, savings: (p && p.savings) || 0, total: (p && p.total) || catSum || 0, cats, catSum };
+  return { fixed: (p && Array.isArray(p.fixed)) ? p.fixed : DEFAULT_FIXED, exists: !!p, own: !!b.plans[monthKey(y, m)], income: (p && p.income) || 0, savings: (p && p.savings) || 0, total: (p && p.total) || catSum || 0, cats, catSum };
 }
 function savePlan(y, m, plan, forward) {
   const b = budgetStore();
@@ -883,7 +916,7 @@ function budgetState(y, m, list) {
   const expectedNow = plan.total * (isCur ? t.getDate() / days : past ? 1 : 0);
   const byCat = spentByCat(list);
   const over = Object.keys(plan.cats).filter(k => (byCat[k] || 0) > plan.cats[k]).map(k => ({ k, by: (byCat[k] || 0) - plan.cats[k] }));
-  const near = Object.keys(plan.cats).filter(k => (byCat[k] || 0) <= plan.cats[k] && (byCat[k] || 0) >= plan.cats[k] * 0.85).map(k => ({ k, left: plan.cats[k] - (byCat[k] || 0) }));
+  const near = Object.keys(plan.cats).filter(k => !plan.fixed.includes(k)).filter(k => (byCat[k] || 0) <= plan.cats[k] && (byCat[k] || 0) >= plan.cats[k] * 0.85).map(k => ({ k, left: plan.cats[k] - (byCat[k] || 0) }));
   return { plan, spent, left, daysLeft, perDay: daysLeft ? Math.max(0, left) / daysLeft : 0, expectedNow, isCur, byCat, over, near };
 }
 
@@ -897,7 +930,10 @@ function renderBudgetCard(list) {
     box.append(card); return;
   }
   const pct = S.spent / S.plan.total;
-  const state = S.left < 0 ? "over" : S.isCur && S.spent > S.expectedNow * 1.05 ? "fast" : "ok";
+  // Pace: mandatory payments count as they are paid; everyday spending is expected to spread evenly.
+  const D = S.isCur ? dailyAllowance(ym.y, ym.m) : null;
+  if (D) { const frac = new Date().getDate() / new Date(ym.y, ym.m + 1, 0).getDate(); S.expectedNow = D.fixedPaid + D.flexBudget * frac; }
+  const state = S.left < 0 ? "over" : D && D.flexSpent > D.flexBudget * (new Date().getDate() / new Date(ym.y, ym.m + 1, 0).getDate()) * 1.05 + 1 ? "fast" : "ok";
   card.classList.add("st-" + state);
   const top = el("div", "bc-top");
   top.append(el("span", "label", "Бюджет на месяц"), el("span", "num", fmt(S.spent) + " из " + fmt(S.plan.total)));
@@ -905,9 +941,9 @@ function renderBudgetCard(list) {
   if (S.isCur) { const pace = el("i", "bc-pace"); pace.style.left = Math.min(100, S.expectedNow / S.plan.total * 100) + "%"; pace.title = "Столько по плану к сегодняшнему дню"; bar.append(pace); }
   const line = el("div", "bc-line");
   if (S.left < 0) line.append(el("b", null, "Перерасход " + fmt(-S.left)));
-  else if (S.isCur) line.append(el("b", null, "Осталось " + fmt(S.left)), " · можно тратить " + fmt(S.perDay) + " в день");
+  else if (S.isCur) { line.append(el("b", null, "Осталось " + fmt(S.left)), " · на повседневное " + fmt(D ? D.perDay : S.perDay) + " в день"); }
   else line.append(el("b", null, "Осталось " + fmt(S.left)));
-  if (state === "fast") line.append(el("span", "bc-warn", " · тратите быстрее плана"));
+  if (state === "fast") line.append(el("span", "bc-warn", " · повседневные траты идут быстрее плана"));
   card.append(top, bar, line);
   const notes = [];
   S.over.slice(0, 2).forEach(o => notes.push("«" + o.k + "» сверх лимита на " + fmt(o.by)));
@@ -1011,15 +1047,25 @@ function openBudget(y, m) {
   function persist() {
     const p = current();
     if (together && p.cats[FOOD] && (plan.cats[FOOD] !== p.cats[FOOD])) { delete p.cats[FOOD_CATS[0]]; delete p.cats[FOOD_CATS[1]]; }
-    savePlan(y, m, { income: p.income, savings: p.savings, total: r2(fTot.value) || 0, cats: p.cats }, false);
+    savePlan(y, m, { income: p.income, savings: p.savings, total: r2(fTot.value) || 0, cats: p.cats, fixed: [...fixedSet] }, false);
   }
+  const fixedSec = el("div", "set-sec"); fixedSec.append(el("h3", null, "Обязательные платежи"));
+  fixedSec.append(el("p", "small-print", "Квартира, коммунальные, подписки и т. п. Они не уменьшают дневную норму «можно сегодня». Регулярные платежи из других категорий приложение находит само."));
+  const fixedSet = new Set(plan.fixed);
+  const chipsBox = el("div", "chips");
+  allCats().filter(c => c !== INCOME_CAT && !FOOD_CATS.includes(c)).forEach(c => {
+    const ch = el("button", "chip-btn" + (fixedSet.has(c) ? " on" : ""), c); ch.type = "button";
+    ch.onclick = () => { if (fixedSet.has(c)) fixedSet.delete(c); else fixedSet.add(c); ch.classList.toggle("on", fixedSet.has(c)); };
+    chipsBox.append(ch);
+  });
+  fixedSec.append(chipsBox); sh.append(fixedSec);
   const fwdWrap = el("label", "check-line"); const fwd = el("input"); fwd.type = "checkbox"; fwd.id = "b-forward"; fwd.checked = true;
   fwdWrap.append(fwd, el("span", null, "Использовать этот план и в следующих месяцах"));
   sh.append(fwdWrap);
   const b = el("div", "btns sticky-btns");
   b.append(button("Сохранить", "primary", () => {
     const p = current();
-    savePlan(y, m, { income: p.income, savings: p.savings, total: r2(fTot.value) || 0, cats: p.cats }, fwd.checked);
+    savePlan(y, m, { income: p.income, savings: p.savings, total: r2(fTot.value) || 0, cats: p.cats, fixed: [...fixedSet] }, fwd.checked);
     toast("Бюджет сохранён"); closeSheet(); render();
   }));
   if (plan.own) {
@@ -1069,12 +1115,14 @@ function renderSavings() {
       c.append(el("span", "label", "Можно сегодня"), el("p", null, "Задайте бюджет на месяц, и здесь будет сумма, которую можно потратить сегодня, чтобы в него уложиться."));
       c.append(button("Задать бюджет", "small primary", () => openBudget(d.getFullYear(), d.getMonth())));
     } else {
-      const spentToday = records.filter(r => rKind(r) === "expense" && inMain(r) && rDate(r) === today).reduce((s, r) => s + mainAmt(r), 0);
-      const allowance = Math.max(0, S.plan.total - (S.spent - spentToday)) / Math.max(1, S.daysLeft);
-      const left = allowance - spentToday;
-      c.classList.toggle("over", left < 0);
-      c.append(el("span", "label", "Можно сегодня"), el("div", "today-big", fmt(Math.max(0, left))));
-      c.append(el("p", null, left < 0 ? "Сегодня уже на " + fmt(-left) + " больше дневной нормы. Завтра норма станет чуть меньше." : "Из дневной нормы " + fmt(allowance) + " потрачено " + fmt(spentToday) + ". До конца месяца " + S.daysLeft + " " + plural(S.daysLeft, "день", "дня", "дней") + "."));
+      const D = dailyAllowance(d.getFullYear(), d.getMonth());
+      c.classList.toggle("over", D.left < 0);
+      c.append(el("span", "label", "Можно сегодня на повседневное"), el("div", "today-big", fmt(Math.max(0, D.left))));
+      c.append(el("p", null, D.left < 0 ? "Сегодня уже на " + fmt(-D.left) + " больше дневной нормы. Завтра норма станет чуть меньше." : "Норма " + fmt(D.perDay) + " в день, сегодня потрачено " + fmt(D.flexToday) + ". До конца месяца " + D.daysLeft + " " + plural(D.daysLeft, "день", "дня", "дней") + "."));
+      const fx = el("div", "today-fixed");
+      fx.append(el("div", null, "Обязательные платежи считаются отдельно и норму не съедают: оплачено " + fmt(D.fixedPaid) + " из ≈ " + fmt(D.fixedExpected) + (D.fixedToday ? " (сегодня " + fmt(D.fixedToday) + ")" : "") + "."));
+      if (D.upcoming.length) fx.append(el("div", null, "Впереди: " + D.upcoming.slice(0, 3).map(x => x.name + " " + fmt(x.amount) + " (" + x.next.slice(8) + "." + x.next.slice(5, 7) + ")").join(", ") + "."));
+      c.append(fx);
     }
     box.append(c);
   }
