@@ -18,8 +18,11 @@ export function buildReport(records, y, m, h) {
   const pkey = py + "-" + pad(pm + 1);
   const mainCur = r => h.rCur(r) === h.currency;
   const inM = (r, k) => h.rDate(r).slice(0, 7) === k;
+  const today = new Date();
+  const ongoing = today.getFullYear() === y && today.getMonth() === m;
   const exp = records.filter(r => inM(r, key) && h.rKind(r) === "expense" && mainCur(r));
-  const prev = records.filter(r => inM(r, pkey) && h.rKind(r) === "expense" && mainCur(r));
+  // While the month is still going, compare with the same days of the previous month.
+  const prev = records.filter(r => inM(r, pkey) && h.rKind(r) === "expense" && mainCur(r) && (!ongoing || parseInt(h.rDate(r).slice(8, 10), 10) <= today.getDate()));
   const inc = records.filter(r => inM(r, key) && h.rKind(r) === "income" && mainCur(r));
   const sum = list => list.reduce((s, r) => s + h.rTotal(r), 0);
   const byCat = list => { const o = {}; list.forEach(r => { const c = h.spendCat(r); o[c] = (o[c] || 0) + h.rTotal(r); }); return o; };
@@ -53,8 +56,9 @@ export function buildReport(records, y, m, h) {
   const notes = [];
   if (prevTotal > 0 && total > 0) {
     const d = (total - prevTotal) / prevTotal;
-    if (Math.abs(d) >= 0.03) notes.push({ tone: d < 0 ? "good" : "bad", text: "Потрачено на " + Math.round(Math.abs(d) * 100) + "% " + (d < 0 ? "меньше" : "больше") + ", чем в " + MONTHS_P[pm] + " (" + h.fmt(prevTotal) + ")." });
-    else notes.push({ tone: "plain", text: "Почти столько же, сколько в " + MONTHS_P[pm] + "." });
+    const when = ongoing ? "к этому же дню в " + MONTHS_P[pm] : "в " + MONTHS_P[pm];
+    if (Math.abs(d) >= 0.03) notes.push({ tone: d < 0 ? "good" : "bad", text: "Потрачено на " + Math.round(Math.abs(d) * 100) + "% " + (d < 0 ? "меньше" : "больше") + ", чем " + when + " (" + h.fmt(prevTotal) + ")." });
+    else notes.push({ tone: "plain", text: "Почти столько же, сколько " + when + "." });
     const changes = Object.keys({ ...cats, ...prevCats })
       .map(c => ({ c, now: cats[c] || 0, was: prevCats[c] || 0 }))
       .filter(x => x.was > 0 && Math.abs(x.now - x.was) >= Math.max(total * 0.04, 1) && Math.abs(x.now - x.was) / x.was >= 0.15)
@@ -71,7 +75,16 @@ export function buildReport(records, y, m, h) {
     notes.push({ tone: "plain", text: "На еду ушло " + Math.round(food / total * 100) + "% трат" + (out > 0 ? ", из них " + Math.round(out / food * 100) + "% — кафе и рестораны." : ".") });
   }
 
+  let budget = null;
+  const plan = h.budget ? h.budget(y, m) : null;
+  if (plan && plan.total > 0) {
+    const over = Object.keys(plan.cats).filter(k => (cats[k] || 0) > plan.cats[k]).map(k => ({ k, by: (cats[k] || 0) - plan.cats[k] })).sort((a, b) => b.by - a.by);
+    const within = Object.keys(plan.cats).filter(k => (cats[k] || 0) <= plan.cats[k]).length;
+    budget = { limit: plan.total, over, within, limits: Object.keys(plan.cats).length, saved: plan.income && !ongoing ? plan.income - total : null, savingsGoal: plan.savings, ongoing };
+  }
+
   return {
+    budget,
     key, y, m, monthTitle: MONTHS[m] + " " + y, prevName: MONTHS_D[pm], total, prevTotal, income, count: exp.length,
     perDay: daysCounted ? total / daysCounted : 0, isCurrent, cats, days, topPlaces, biggest, topItems, notes,
   };
@@ -140,7 +153,7 @@ export async function drawReport(R, h) {
   ctx.fillText(R.count + " " + h.plural(R.count, "трата", "траты", "трат") + "  ·  " + h.fmt(R.perDay) + " в день" + (R.isCurrent ? " (месяц ещё идёт)" : ""), P, 404);
   if (R.prevTotal > 0) {
     const d = (R.total - R.prevTotal) / R.prevTotal;
-    const label = (d < 0 ? "▼ " : "▲ ") + Math.round(Math.abs(d) * 100) + "% к " + R.prevName;
+    const label = (d < 0 ? "▼ " : "▲ ") + Math.round(Math.abs(d) * 100) + "% к " + R.prevName + (R.isCurrent ? " (те же дни)" : "");
     ctx.font = "600 32px " + BODY; const lw = ctx.measureText(label).width;
     ctx.fillStyle = "rgba(255,255,255,.16)"; roundRect(ctx, P, 438, lw + 48, 60, 30); ctx.fill();
     ctx.fillStyle = C.bandInk; ctx.fillText(label, P + 24, 479);
@@ -168,6 +181,31 @@ export async function drawReport(R, h) {
         lines.forEach((l, i) => ctx.fillText(l, P + 52, ly + i * 46));
         ly += lines.length * 46 + 26;
       });
+    });
+  }
+
+  /* budget */
+  if (R.budget) {
+    const B = R.budget, overTotal = R.total - B.limit;
+    const lines = [];
+    if (B.limits) lines.push((B.ongoing ? "Пока в лимите " : "Уложились в лимит по ") + B.within + " из " + B.limits + " " + h.plural(B.limits, "категории", "категорий", "категорий") + ".");
+    B.over.slice(0, 2).forEach(o => lines.push("«" + o.k + "»: сверх лимита на " + h.fmt(o.by) + "."));
+    if (B.saved != null && B.savingsGoal) lines.push(B.saved >= B.savingsGoal ? "Цель отложить " + h.fmt(B.savingsGoal) + " выполнена." : "До цели отложить не хватило " + h.fmt(B.savingsGoal - Math.max(0, B.saved)) + ".");
+    ctx.font = "400 32px " + BODY;
+    const wrapped = lines.map(l => wrap(ctx, l, IW - 24));
+    const height = 300 + wrapped.reduce((a, w) => a + w.length * 44 + 8, 0);
+    card(height, top => {
+      heading("Бюджет", top);
+      ctx.textAlign = "right"; ctx.font = "600 32px " + MONO; ctx.fillStyle = C.ink;
+      ctx.fillText(h.fmt(R.total) + " из " + h.fmt(B.limit), P + IW - 12, top + 70); ctx.textAlign = "left";
+      const by = top + 108, bw = IW - 24, bh = 26;
+      ctx.fillStyle = C.soft; roundRect(ctx, P + 12, by, bw, bh, 13); ctx.fill();
+      ctx.fillStyle = overTotal > 0 ? C.bad : C.accent;
+      roundRect(ctx, P + 12, by, Math.max(bh, bw * Math.min(1, R.total / B.limit)), bh, 13); ctx.fill();
+      ctx.font = "700 44px " + DISPLAY; ctx.fillStyle = overTotal > 0 ? C.bad : C.good;
+      ctx.fillText(overTotal > 0 ? "Перерасход " + h.fmt(overTotal) : (B.ongoing ? "Осталось " : "Сэкономлено ") + h.fmt(-overTotal), P + 12, top + 210);
+      let ly = top + 268; ctx.font = "400 32px " + BODY; ctx.fillStyle = C.ink;
+      wrapped.forEach(w => { w.forEach((l, i) => ctx.fillText(l, P + 12, ly + i * 44)); ly += w.length * 44 + 8; });
     });
   }
 

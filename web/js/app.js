@@ -113,7 +113,7 @@ let installEvent = null;
 let updateInfo = null;
 let bankState = { enabled: false, watched: [], candidates: [] };
 
-async function reload() { records = await store.allReceipts(); render(); ensureFx(); }
+async function reload() { records = await store.allReceipts(); render(); ensureFx(); checkBudgetAlerts(); }
 
 /* ---------- toast ---------- */
 let tt;
@@ -279,6 +279,7 @@ function renderSpend(list) {
   const pending = list.filter(needsParse).length;
   if (pending) add(String(pending), "ждут разбора");
 
+  renderBudgetCard(list);
   const box = $("#list"); box.innerHTML = "";
   renderInbox(box);
   if (!list.length) {
@@ -375,14 +376,15 @@ function rowEl(r) {
 /** Horizontal bars. An entry may carry parts: [[name, value], ...] drawn as coloured segments of one bar. */
 function bars(container, entries, emptyText) {
   container.innerHTML = "";
-  entries = entries.filter(([, v]) => v > 0.004).sort((a, b) => b[1] - a[1]);
+  entries = entries.filter(([, v, , lim]) => v > 0.004 || lim > 0).sort((a, b) => b[1] - a[1] || (b[3] || 0) - (a[3] || 0));
   if (!entries.length) { container.append(el("p", "hint", emptyText)); return; }
   const total = entries.reduce((a, [, v]) => a + v, 0);
-  const max = entries[0][1];
-  entries.forEach(([k, v, parts]) => {
-    const row = el("div", "bar");
-    const r = el("span", "num", fmt(v)); r.append(el("span", "pct", Math.round(v / total * 100) + "%"));
+  const max = Math.max(...entries.map(([, v, , lim]) => Math.max(v, lim || 0)));
+  entries.forEach(([k, v, parts, limit]) => {
+    const row = el("div", "bar" + (limit && v > limit ? " over" : ""));
+    const r = el("span", "num", fmt(v)); r.append(el("span", "pct", limit ? "из " + money(limit) : Math.round(v / total * 100) + "%"));
     const tr = el("div", "track");
+    if (limit) { const mk = el("i", "limit"); mk.style.left = Math.min(100, limit / max * 100) + "%"; mk.title = "Лимит " + fmt(limit); tr.append(mk); }
     if (parts && parts.length > 1) {
       tr.classList.add("stacked");
       const legend = el("div", "bar-legend");
@@ -392,7 +394,7 @@ function bars(container, entries, emptyText) {
       });
       row.append(el("span", null, k), r, tr, legend);
     } else {
-      const f = el("div", "fill"); f.style.width = Math.max(2, v / max * 100) + "%"; tr.append(f);
+      const f = el("div", "fill"); f.style.width = (v > 0.004 ? Math.max(2, v / max * 100) : 0) + "%"; tr.append(f);
       row.append(el("span", null, k), r, tr);
     }
     container.append(row);
@@ -408,9 +410,14 @@ function renderStats(list) {
     const byCat = {};
     exp.forEach(r => { const c = spendCat(r); byCat[c] = (byCat[c] || 0) + mainAmt(r); });
     // Groceries and eating out share one bar: together they are "food", split by colour.
-    const entries = Object.entries(byCat).filter(([k]) => k !== "Продукты" && k !== "Кафе и рестораны");
+    const lim = planFor(ym.y, ym.m).cats;
+    const entries = Object.entries(byCat).filter(([k]) => k !== "Продукты" && k !== "Кафе и рестораны").map(([k, v]) => [k, v, null, lim[k] || null]);
+    Object.keys(lim).forEach(k => { if (!byCat[k] && k !== "Продукты" && k !== "Кафе и рестораны" && lim[k] > 0) entries.push([k, 0, null, lim[k]]); });
     const food = [["Продукты", byCat["Продукты"] || 0], ["Кафе и рестораны", byCat["Кафе и рестораны"] || 0]].filter(([, v]) => v > 0.004);
-    if (food.length) entries.push([food.length > 1 ? "Еда" : food[0][0], food.reduce((a, [, v]) => a + v, 0), food.length > 1 ? food : null]);
+    if (food.length) {
+      const fl = food.length > 1 ? (lim["Продукты"] && lim["Кафе и рестораны"] ? lim["Продукты"] + lim["Кафе и рестораны"] : null) : (lim[food[0][0]] || null);
+      entries.push([food.length > 1 ? "Еда" : food[0][0], food.reduce((a, [, v]) => a + v, 0), food.length > 1 ? food : null, fl]);
+    }
     bars($("#spendCats"), entries, "Здесь появится разбивка, когда в месяце будут траты.");
     const places = {};
     exp.forEach(r => { const k = bank.normMerchant(rName(r)) || rName(r); const o = places[k] = places[k] || { name: rName(r), sum: 0, count: 0 }; o.sum += mainAmt(r); o.count++; });
@@ -827,8 +834,189 @@ async function openReceipt(id) {
   b2.append(save, del); sh.append(b2);
 }
 
+/* ---------- budget ---------- */
+// Plans are kept per month; "default" is copied forward to months without their own plan.
+const budgetStore = () => LS.json("budget", { plans: {} });
+const monthKey = (y, m) => y + "-" + pad(m + 1);
+function planFor(y, m) {
+  const b = budgetStore(), p = b.plans[monthKey(y, m)] || b.plans.default || null;
+  const cats = Object.assign({}, (p && p.cats) || {});
+  Object.keys(cats).forEach(k => { if (!(cats[k] > 0)) delete cats[k]; });
+  const catSum = Object.values(cats).reduce((a, v) => a + v, 0);
+  return { exists: !!p, own: !!b.plans[monthKey(y, m)], income: (p && p.income) || 0, savings: (p && p.savings) || 0, total: (p && p.total) || catSum || 0, cats, catSum };
+}
+function savePlan(y, m, plan, forward) {
+  const b = budgetStore();
+  b.plans[monthKey(y, m)] = plan;
+  if (forward) b.plans.default = plan;
+  LS.set("budget", JSON.stringify(b));
+}
+function spentByCat(list) {
+  const o = {};
+  list.filter(r => rKind(r) === "expense" && inMain(r)).forEach(r => { const c = spendCat(r); o[c] = (o[c] || 0) + mainAmt(r); });
+  return o;
+}
+function budgetState(y, m, list) {
+  const plan = planFor(y, m);
+  const spent = list.filter(r => rKind(r) === "expense" && inMain(r)).reduce((s, r) => s + mainAmt(r), 0);
+  const days = new Date(y, m + 1, 0).getDate();
+  const t = new Date(), isCur = t.getFullYear() === y && t.getMonth() === m;
+  const past = isCur ? t.getDate() - 1 : (new Date(y, m, 1) < t ? days : 0);
+  const left = plan.total - spent;
+  const daysLeft = isCur ? days - t.getDate() + 1 : 0;
+  const expectedNow = plan.total * (isCur ? t.getDate() / days : past ? 1 : 0);
+  const byCat = spentByCat(list);
+  const over = Object.keys(plan.cats).filter(k => (byCat[k] || 0) > plan.cats[k]).map(k => ({ k, by: (byCat[k] || 0) - plan.cats[k] }));
+  const near = Object.keys(plan.cats).filter(k => (byCat[k] || 0) <= plan.cats[k] && (byCat[k] || 0) >= plan.cats[k] * 0.85).map(k => ({ k, left: plan.cats[k] - (byCat[k] || 0) }));
+  return { plan, spent, left, daysLeft, perDay: daysLeft ? Math.max(0, left) / daysLeft : 0, expectedNow, isCur, byCat, over, near };
+}
+
+function renderBudgetCard(list) {
+  const box = $("#budgetCard"); box.innerHTML = "";
+  const S = budgetState(ym.y, ym.m, list);
+  const card = el("button", "budget-card"); card.type = "button"; card.onclick = () => openBudget(ym.y, ym.m);
+  if (!S.plan.total) {
+    card.classList.add("empty-budget");
+    card.append(el("b", null, "Спланировать бюджет на " + monthName(ym.m).toLowerCase()), el("span", null, "Лимиты по категориям, доход и сколько отложить. Можно заполнить по прошлым месяцам."));
+    box.append(card); return;
+  }
+  const pct = S.spent / S.plan.total;
+  const state = S.left < 0 ? "over" : S.isCur && S.spent > S.expectedNow * 1.05 ? "fast" : "ok";
+  card.classList.add("st-" + state);
+  const top = el("div", "bc-top");
+  top.append(el("span", "label", "Бюджет на месяц"), el("span", "num", fmt(S.spent) + " из " + fmt(S.plan.total)));
+  const bar = el("div", "bc-bar"); const f = el("div", "bc-fill"); f.style.width = Math.min(100, pct * 100) + "%"; bar.append(f);
+  if (S.isCur) { const pace = el("i", "bc-pace"); pace.style.left = Math.min(100, S.expectedNow / S.plan.total * 100) + "%"; pace.title = "Столько по плану к сегодняшнему дню"; bar.append(pace); }
+  const line = el("div", "bc-line");
+  if (S.left < 0) line.append(el("b", null, "Перерасход " + fmt(-S.left)));
+  else if (S.isCur) line.append(el("b", null, "Осталось " + fmt(S.left)), " · можно тратить " + fmt(S.perDay) + " в день");
+  else line.append(el("b", null, "Осталось " + fmt(S.left)));
+  if (state === "fast") line.append(el("span", "bc-warn", " · тратите быстрее плана"));
+  card.append(top, bar, line);
+  const notes = [];
+  S.over.slice(0, 2).forEach(o => notes.push("«" + o.k + "» сверх лимита на " + fmt(o.by)));
+  if (notes.length < 2) S.near.slice(0, 2 - notes.length).forEach(o => notes.push("«" + o.k + "»: осталось " + fmt(o.left)));
+  if (notes.length) card.append(el("div", "bc-notes", notes.join(" · ")));
+  box.append(card);
+}
+
+function averageByCat(y, m, months) {
+  const sums = {}; let n = 0;
+  for (let i = 1; i <= months; i++) {
+    const d = new Date(y, m - i, 1), k = monthKey(d.getFullYear(), d.getMonth());
+    const list = records.filter(r => rDate(r).slice(0, 7) === k);
+    if (!list.some(r => rKind(r) === "expense")) continue;
+    n++;
+    const by = spentByCat(list); Object.keys(by).forEach(c => { sums[c] = (sums[c] || 0) + by[c]; });
+    sums.__income = (sums.__income || 0) + list.filter(r => rKind(r) === "income" && inMain(r)).reduce((s, r) => s + mainAmt(r), 0);
+  }
+  if (!n) return null;
+  const roundUp = v => { const step = v >= 1000 ? 50 : v >= 200 ? 10 : 5; return Math.ceil(v / step) * step; };
+  const out = { cats: {}, income: sums.__income ? Math.round(sums.__income / n) : 0, months: n };
+  Object.keys(sums).forEach(c => { if (c !== "__income" && sums[c] / n >= 1) out.cats[c] = roundUp(sums[c] / n); });
+  return out;
+}
+
+function openBudget(y, m) {
+  openId = null;
+  const sh = sheetStart("Бюджет · " + monthName(m) + " " + y, "budget");
+  const plan = planFor(y, m);
+  const list = records.filter(r => rDate(r).slice(0, 7) === monthKey(y, m));
+  const spent = spentByCat(list);
+  if (plan.exists && !plan.own) sh.append(el("p", "small-print", "Взят план прошлых месяцев. Измените и сохраните, если в этом месяце нужно иначе."));
+
+  const fs = el("div", "fields");
+  const moneyInp = (id, v) => { const i = inp(id, "text", v ? String(v) : ""); i.inputMode = "decimal"; i.placeholder = "0"; return i; };
+  const fInc = moneyInp("b-income", plan.income), fSav = moneyInp("b-savings", plan.savings), fTot = moneyInp("b-total", plan.total && plan.total !== plan.catSum ? plan.total : "");
+  fTot.placeholder = "сумма лимитов";
+  fs.append(field("Ожидаемый доход, " + cur(), fInc), field("Хочу отложить, " + cur(), fSav), field("Общий лимит трат, " + cur(), fTot, true));
+  sh.append(fs);
+  const summary = el("div", "budget-sum"); sh.append(summary);
+
+  const sec = el("div", "set-sec"); sec.append(el("h3", null, "Лимиты по категориям"));
+  sec.append(el("p", "small-print", "Пустое поле — без лимита. Справа потрачено в этом месяце."));
+  const rows = el("div", "limit-list");
+  const inputs = {};
+  const cats = allCats().filter(c => c !== INCOME_CAT);
+  cats.forEach((c, i) => {
+    const row = el("div", "limit-row");
+    const name = el("div", "lr-name"); name.append(el("span", null, c));
+    const sp = spent[c] || 0;
+    const info = el("small", null, sp ? "потрачено " + fmt(sp) : "пока 0");
+    name.append(info);
+    const li = moneyInp("lim-" + i, plan.cats[c]); li.setAttribute("aria-label", "Лимит: " + c);
+    const mini = el("div", "lr-bar"); const mf = el("div", "lr-fill"); mini.append(mf);
+    const upd = () => { const v = num(li.value); mf.style.width = v ? Math.min(100, sp / v * 100) + "%" : "0"; row.classList.toggle("over", !!v && sp > v); };
+    li.oninput = () => { upd(); updSummary(); };
+    upd();
+    inputs[c] = li;
+    row.append(name, li, mini); rows.append(row);
+  });
+  sec.append(rows);
+
+  const fill = button("Заполнить по прошлым месяцам", "small", () => {
+    const avg = averageByCat(y, m, 3);
+    if (!avg) { toast("Нет данных за прошлые месяцы"); return; }
+    cats.forEach(c => { inputs[c].value = avg.cats[c] ? String(avg.cats[c]) : ""; inputs[c].oninput(); });
+    if (avg.income && !fInc.value) fInc.value = String(avg.income);
+    fTot.value = ""; updSummary();
+    toast("Заполнено по среднему за " + avg.months + " " + plural(avg.months, "месяц", "месяца", "месяцев") + ". Поправьте, где нужно.");
+  });
+  const fillRow = el("div", "btns"); fillRow.append(fill); sh.append(fillRow);
+  sh.append(sec);
+
+  function current() {
+    const c = {}; cats.forEach(k => { const v = r2(inputs[k].value); if (v > 0) c[k] = v; });
+    const catSum = Object.values(c).reduce((a, v) => a + v, 0);
+    return { income: r2(fInc.value) || 0, savings: r2(fSav.value) || 0, total: r2(fTot.value) || catSum, cats: c, catSum };
+  }
+  function updSummary() {
+    const p = current(); summary.innerHTML = "";
+    const line = (label, value, cls) => { const d = el("div", "bs-line " + (cls || "")); d.append(el("span", null, label), el("b", "num", value)); summary.append(d); };
+    line("Лимит трат", p.total ? fmt(p.total) : "не задан");
+    if (p.catSum && p.total && Math.abs(p.total - p.catSum) > 0.5) line("Распределено по категориям", fmt(p.catSum), p.catSum > p.total ? "bad" : "");
+    if (p.income) {
+      const free = p.income - p.savings - p.total;
+      if (p.savings) line("Отложить", fmt(p.savings));
+      line(free >= 0 ? "Остаётся свободным" : "Не хватает до плана", fmt(Math.abs(free)), free >= 0 ? "good" : "bad");
+    }
+  }
+  updSummary();
+
+  const fwdWrap = el("label", "check-line"); const fwd = el("input"); fwd.type = "checkbox"; fwd.id = "b-forward"; fwd.checked = true;
+  fwdWrap.append(fwd, el("span", null, "Использовать этот план и в следующих месяцах"));
+  sh.append(fwdWrap);
+  const b = el("div", "btns sticky-btns");
+  b.append(button("Сохранить", "primary", () => {
+    const p = current();
+    savePlan(y, m, { income: p.income, savings: p.savings, total: r2(fTot.value) || 0, cats: p.cats }, fwd.checked);
+    toast("Бюджет сохранён"); closeSheet(); render();
+  }));
+  if (plan.own) {
+    let armed = false;
+    const del = button("Сбросить", "ghost danger", () => {
+      if (!armed) { armed = true; del.textContent = "Точно сбросить?"; setTimeout(() => { armed = false; del.textContent = "Сбросить"; }, 4000); return; }
+      const st = budgetStore(); delete st.plans[monthKey(y, m)]; LS.set("budget", JSON.stringify(st)); toast("План месяца сброшен"); closeSheet(); render();
+    });
+    b.append(del);
+  }
+  sh.append(b);
+}
+
+// A one-time nudge when an operation pushes a category over its limit.
+function checkBudgetAlerts() {
+  const t = new Date(); const S = budgetState(t.getFullYear(), t.getMonth(), records.filter(r => rDate(r).slice(0, 7) === monthKey(t.getFullYear(), t.getMonth())));
+  if (!S.plan.total) return;
+  const seen = LS.json("budgetAlerts", {}); const key = monthKey(t.getFullYear(), t.getMonth());
+  const done = new Set(seen[key] || []);
+  const msgs = [];
+  S.over.forEach(o => { if (!done.has(o.k)) { done.add(o.k); msgs.push("«" + o.k + "» вышли за лимит"); } });
+  if (S.left < 0 && !done.has("__total")) { done.add("__total"); msgs.push("Бюджет месяца превышен на " + fmt(-S.left)); }
+  if (msgs.length) { seen[key] = [...done]; LS.set("budgetAlerts", JSON.stringify(seen)); toast(msgs.join(". "), 5000); }
+}
+
 /* ---------- monthly report ---------- */
-const reportHelpers = () => ({ spendCat, rTotal: mainAmt, rKind, rName, rCur: r => inMain(r) ? currencyCode() : rCur(r), rDate, norm: bank.normMerchant, currency: currencyCode(), symbol: cur(), fmt: v => fmt(v), money, plural, factor: fxFactor });
+const reportHelpers = () => ({ spendCat, rTotal: mainAmt, rKind, rName, rCur: r => inMain(r) ? currencyCode() : rCur(r), rDate, norm: bank.normMerchant, currency: currencyCode(), symbol: cur(), fmt: v => fmt(v), money, plural, factor: fxFactor, budget: (y, m) => planFor(y, m) });
 function prevMonthReport() {
   const d = new Date();
   if (d.getDate() > 10) return null;
