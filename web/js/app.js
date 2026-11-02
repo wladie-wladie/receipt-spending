@@ -1,6 +1,7 @@
 import * as store from "./db.js";
-import { CATS, MODELS, checkKey, recognizeWithClaude, recognizeFree, unitPrice, classifyOperations } from "./recognize.js";
-import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion, checkForUpdates, updateStatus, shareImageFile, notificationsAvailable, scheduleReportNotification, onReportNotificationTap, onBackButton } from "./native.js";
+import { CATS, MODELS, checkKey, recognizeWithClaude, recognizeFree, unitPrice, classifyOperations, askClaudeJSON } from "./recognize.js";
+import { analyse, CHALLENGES, challengeProgress } from "./savings.js";
+import { isNative, takePhoto, shareTextFile, initUpdates, applyUpdateNow, appVersion, checkForUpdates, updateStatus, shareImageFile, notificationsAvailable, scheduleReportNotification, onReportNotificationTap, onBackButton, notifyNow } from "./native.js";
 import { buildReport, drawReport, monthName, monthIn } from "./report.js";
 import * as bank from "./bank.js";
 import { convert } from "./fx.js";
@@ -203,7 +204,7 @@ function render() {
   $("#mlabel").textContent = MONTHS[ym.m] + " " + ym.y;
   renderBanner();
   const list = records.filter(inMonth);
-  if (tab === "spend") renderSpend(list); else renderStats(list);
+  if (tab === "spend") renderSpend(list); else if (tab === "save") renderSavings(); else renderStats(list);
 }
 
 function isStandalone() { return isNative() || window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true; }
@@ -452,10 +453,13 @@ function fillTop(ul, arr, right, mid) {
 
 /* ---------- tabs & month ---------- */
 function setTab(t) {
-  tab = t; $("#view-spend").hidden = t !== "spend"; $("#view-stats").hidden = t !== "stats";
-  $("#tab-spend").setAttribute("aria-selected", t === "spend"); $("#tab-stats").setAttribute("aria-selected", t === "stats");
-  render();
+  tab = t;
+  ["spend", "stats", "save"].forEach(v => { $("#view-" + v).hidden = t !== v; $("#tab-" + v).setAttribute("aria-selected", String(t === v)); });
+  document.querySelector(".top .month").style.visibility = t === "save" ? "hidden" : "";
+  render(); window.scrollTo(0, 0);
 }
+$("#tab-save").onclick = () => setTab("save");
+$("#tab-budget").onclick = () => { const d = new Date(); openBudget(d.getFullYear(), d.getMonth()); };
 $("#tab-spend").onclick = () => setTab("spend");
 $("#tab-stats").onclick = () => setTab("stats");
 $("#st-all").onclick = () => { statsView = "all"; render(); };
@@ -1036,9 +1040,235 @@ function checkBudgetAlerts() {
   const seen = LS.json("budgetAlerts", {}); const key = monthKey(t.getFullYear(), t.getMonth());
   const done = new Set(seen[key] || []);
   const msgs = [];
-  S.over.forEach(o => { if (!done.has(o.k)) { done.add(o.k); msgs.push("«" + o.k + "» вышли за лимит"); } });
+  S.over.forEach(o => { if (!done.has(o.k)) { done.add(o.k); done.add("near:" + o.k); msgs.push("«" + o.k + "» вышли за лимит"); } });
+  S.near.forEach(o => { if (!done.has("near:" + o.k)) { done.add("near:" + o.k); msgs.push("«" + o.k + "»: осталось " + fmt(o.left) + " до лимита"); } });
   if (S.left < 0 && !done.has("__total")) { done.add("__total"); msgs.push("Бюджет месяца превышен на " + fmt(-S.left)); }
-  if (msgs.length) { seen[key] = [...done]; LS.set("budgetAlerts", JSON.stringify(seen)); toast(msgs.join(". "), 5000); }
+  if (!msgs.length) return;
+  seen[key] = [...done]; LS.set("budgetAlerts", JSON.stringify(seen));
+  if (document.visibilityState !== "visible") notifyNow("Бюджет", msgs.join(". ")).then(ok => { if (!ok) toast(msgs.join(". "), 5000); });
+  else toast(msgs.join(". "), 5000);
+}
+
+/* ---------- "Экономия" tab ---------- */
+const timeOf = r => r.time || ((r.source === "bank" || r.source === "photo") && r.createdAt ? hhmm(new Date(r.createdAt)) : null);
+const savingsCtx = () => ({ records, mainAmt, inMain, rKind, rDate, rName, spendCat, norm: bank.normMerchant, fxFactor, timeOf });
+const sCard = (title, sub) => { const c = el("div", "card save-card"); const h = el("h2", null, title); c.append(h); if (sub) c.append(el("p", "save-sub", sub)); return c; };
+const kv = (label, value, cls) => { const d = el("div", "kv " + (cls || "")); d.append(el("span", null, label), el("b", "num", value)); return d; };
+const dmy = s => s.split("-").reverse().slice(0, 2).join(".");
+
+function renderSavings() {
+  const box = $("#saveBox"); box.innerHTML = "";
+  const A = analyse(savingsCtx());
+  const d = new Date(), today = isoDay(d);
+
+  /* today allowance */
+  {
+    const S = budgetState(d.getFullYear(), d.getMonth(), records.filter(r => rDate(r).slice(0, 7) === monthKey(d.getFullYear(), d.getMonth())));
+    const c = el("div", "today-card");
+    if (!S.plan.total) {
+      c.append(el("span", "label", "Можно сегодня"), el("p", null, "Задайте бюджет на месяц, и здесь будет сумма, которую можно потратить сегодня, чтобы в него уложиться."));
+      c.append(button("Задать бюджет", "small primary", () => openBudget(d.getFullYear(), d.getMonth())));
+    } else {
+      const spentToday = records.filter(r => rKind(r) === "expense" && inMain(r) && rDate(r) === today).reduce((s, r) => s + mainAmt(r), 0);
+      const allowance = Math.max(0, S.plan.total - (S.spent - spentToday)) / Math.max(1, S.daysLeft);
+      const left = allowance - spentToday;
+      c.classList.toggle("over", left < 0);
+      c.append(el("span", "label", "Можно сегодня"), el("div", "today-big", fmt(Math.max(0, left))));
+      c.append(el("p", null, left < 0 ? "Сегодня уже на " + fmt(-left) + " больше дневной нормы. Завтра норма станет чуть меньше." : "Из дневной нормы " + fmt(allowance) + " потрачено " + fmt(spentToday) + ". До конца месяца " + S.daysLeft + " " + plural(S.daysLeft, "день", "дня", "дней") + "."));
+    }
+    box.append(c);
+  }
+
+  if (!A.hasData) { box.append(emptyState("Пока нечего анализировать", "Когда в приложении появятся траты за несколько недель, здесь будут подписки, мелкие траты, цены и советы.")); return; }
+
+  /* recurring payments */
+  {
+    const ignored = new Set(LS.json("savIgnore", []));
+    const list = A.recurring.filter(x => !ignored.has(x.key));
+    const c = sCard("Подписки и регулярные платежи", list.length ? "Повторяются каждый месяц или неделю. Проверьте, всё ли ещё нужно." : null);
+    if (!list.length) c.append(el("p", "hint", A.days < 45 ? "Нужно хотя бы 1,5–2 месяца операций, чтобы увидеть, что повторяется." : "Регулярных платежей не нашлось."));
+    else {
+      const total = list.reduce((s, x) => s + x.perMonth, 0);
+      c.append(kv("Всего в месяц", fmt(total)), kv("В год", fmt(total * 12), "accent"));
+      list.slice(0, 12).forEach(x => {
+        const row = el("div", "sub-row");
+        const t = el("div", "rmain"); t.append(el("div", "rname", x.name), el("div", "rsub", (x.period === "week" ? "каждую неделю" : "каждый месяц") + " · " + x.cat + " · следующий ≈ " + dmy(x.next)));
+        const a = el("div", "sub-amt"); a.append(el("b", "num", fmt(x.amount)), el("small", null, fmt(x.perYear) + " в год"));
+        const hide = button("Скрыть", "small ghost", () => { LS.set("savIgnore", JSON.stringify([...ignored, x.key])); renderSavings(); toast("Скрыто. Вернуть можно кнопкой внизу карточки."); });
+        row.append(t, a, hide); c.append(row);
+      });
+    }
+    if (ignored.size) c.append(button("Показать скрытые (" + ignored.size + ")", "small ghost", () => { LS.set("savIgnore", "[]"); renderSavings(); }));
+    box.append(c);
+  }
+
+  /* small purchases */
+  if (A.small.count) {
+    const c = sCard("Мелочь, которая складывается", "Покупки до " + fmt(A.smallLimit) + " за последние 30 дней, кроме продуктов.");
+    c.append(kv("Покупок", String(A.small.count)), kv("Сумма", fmt(A.small.sum) + " · " + Math.round(A.small.share * 100) + "% трат"), kv("Если так весь год", fmt(A.small.perYear), "accent"));
+    if (A.small.top.length) c.append(el("p", "save-sub", "Чаще всего: " + A.small.top.map(t => t.name + " (" + t.count + " × , " + fmt(t.sum) + ")").join("; ") + "."));
+    box.append(c);
+  }
+
+  /* impulsive spending */
+  {
+    const I = A.impulse, rows = [];
+    if (I.delivery.count) rows.push(kv("Доставка еды", I.delivery.count + " × · " + fmt(I.delivery.sum)));
+    if (I.late.count) rows.push(kv("Покупки после 22:00", I.late.count + " × · " + fmt(I.late.sum)));
+    if (I.afterPay && I.afterPay.ratio >= 1.3) rows.push(kv("После зарплаты", "в " + I.afterPay.ratio.toFixed(1).replace(".", ",") + " раза больше обычного", "warn"));
+    if (rows.length) {
+      const c = sCard("Импульсивные траты", "За последние 30 дней. Это траты, которые чаще всего получается сократить без потерь.");
+      rows.forEach(r => c.append(r));
+      if (I.timedShare < 0.5) c.append(el("p", "hint", "Время известно не у всех трат: оно берётся из уведомлений банка и фото чеков."));
+      box.append(c);
+    }
+  }
+
+  /* eating out vs home */
+  if (A.cafe) {
+    const C = A.cafe, c = sCard("Кафе или дома", "За последние 30 дней.");
+    c.append(kv("Кафе, рестораны, доставка", C.count + " × · " + fmt(C.sum)), kv("Средний чек", fmt(C.avgCheck)));
+    if (C.homeMeal != null) {
+      c.append(kv("Порция дома ≈", fmt(C.homeMeal)));
+      if (C.save8 > 0) c.append(kv("Если 2 раза в неделю есть дома", "+" + fmt(C.save8) + " в месяц", "accent"));
+      c.append(el("p", "hint", "Порция дома — оценка: ваши траты на продукты, делённые на 2–3 приёма пищи в день."));
+    }
+    box.append(c);
+  }
+
+  /* prices */
+  {
+    const c = sCard("Цены на продукты");
+    if (A.itemLines < 15) c.append(el("p", "hint", "Нужно больше чеков из разных магазинов: сейчас позиций с ценой за кг или литр " + A.itemLines + ". Обычно хватает 3–4 недель."));
+    else {
+      if (A.cheaper.length) {
+        c.append(el("h3", "save-h3", "Где дешевле"));
+        A.cheaper.slice(0, 6).forEach(x => c.append(kv(x.g + ": в «" + x.best + "» на " + Math.round(x.diff * 100) + "% дешевле", "≈ " + fmt(x.perMonth) + " в мес.", "accent")));
+      } else c.append(el("p", "hint", "Пока не нашлось продуктов, которые вы покупали в разных магазинах по заметно разной цене."));
+      if (A.rises.length) {
+        c.append(el("h3", "save-h3", "Подорожало"));
+        A.rises.slice(0, 5).forEach(x => c.append(kv(x.g, "+" + Math.round(x.rise * 100) + "% за месяц", "warn")));
+      }
+    }
+    box.append(c);
+  }
+
+  /* Claude: basket review */
+  box.append(aiCard("aiBasket", "Разбор корзины от Claude", "Оценка того, что вы покупаете, и замены с разницей в цене.", "Разобрать корзину",
+    () => A.basket.length >= 5 ? null : "Нужны чеки с позициями хотя бы за пару недель.",
+    () => askClaudeJSON(`Ты помогаешь человеку питаться разумнее и экономить. Ниже его покупки продуктов за 30 дней (название, тип, метки, сумма в ${currencyCode()}, сколько раз куплено). Траты на продукты: ${money(A.food30.groceries)}, на кафе и доставку: ${money(A.food30.cafe)}.
+Ответь ТОЛЬКО JSON без markdown:
+{"score":7,"summary":"1–2 предложения общей оценки","good":["что хорошо"],"watch":["на что обратить внимание"],"swaps":[{"from":"что","to":"на что заменить","why":"зачем","save":"≈ сколько сэкономит в месяц или пусто"}]}
+score — от 1 до 10, насколько полезна корзина. 2–4 пункта в good и watch, 3–5 замен. Пиши по-русски, коротко, без медицинских диагнозов.
+Покупки:
+${JSON.stringify(A.basket)}`, apiKey(), MODELS.accurate.id),
+    (c, data) => {
+      const head = el("div", "ai-score"); head.append(el("b", null, String(data.score || "–")), el("span", null, "/10 · " + (data.summary || "")));
+      c.append(head);
+      const list = (title, arr, cls) => { if (!Array.isArray(arr) || !arr.length) return; c.append(el("h3", "save-h3", title)); const ul = el("ul", "ai-list " + (cls || "")); arr.forEach(t => ul.append(el("li", null, String(t)))); c.append(ul); };
+      list("Хорошо", data.good, "good"); list("Обратить внимание", data.watch, "watch");
+      if (Array.isArray(data.swaps) && data.swaps.length) {
+        c.append(el("h3", "save-h3", "Замены"));
+        data.swaps.forEach(x => { const r = el("div", "swap"); r.append(el("b", null, (x.from || "") + " → " + (x.to || "")), el("span", null, (x.why || "") + (x.save ? " · " + x.save : ""))); c.append(r); });
+      }
+    }));
+
+  /* Claude: meal plan */
+  {
+    const plan = planFor(d.getFullYear(), d.getMonth());
+    const foodLimit = plan.cats["Еда"] || plan.cats["Продукты"] || A.food30.groceries || 0;
+    const week = foodLimit / 4.33;
+    box.append(aiCard("aiMeal", "Меню на неделю и список покупок", week ? "Под бюджет около " + fmt(week) + " на неделю, из того, что вы обычно покупаете." : "Из того, что вы обычно покупаете.", "Составить меню",
+      () => A.basket.length >= 5 || week ? null : "Нужны чеки с продуктами или бюджет на еду.",
+      () => askClaudeJSON(`Составь простое домашнее меню на 7 дней и список покупок для одного человека. Бюджет на продукты на неделю: ${week ? money(week) + " " + currencyCode() : "не задан, ориентируйся на обычные траты"}. Опирайся на продукты, которые человек обычно покупает (с ценами за 30 дней в ${currencyCode()}): ${JSON.stringify(A.basket.slice(0, 40).map(b => ({ name: b.name, sum: b.sum, count: b.count })))}.
+Блюда — несложные, повторяющиеся ингредиенты, чтобы ничего не пропадало. Ответь ТОЛЬКО JSON без markdown:
+{"days":[{"day":"Пн","meals":["Завтрак: …","Обед: …","Ужин: …"]}],"shopping":[{"item":"куриное филе","qty":"1 кг","price":12.5}],"total":95,"tips":["короткий совет"]}
+Цены — примерные, в ${currencyCode()}. Пиши по-русски.`, apiKey(), MODELS.accurate.id, 6000),
+      (c, data) => {
+        if (Array.isArray(data.days)) data.days.forEach(dd => { const r = el("div", "meal-day"); r.append(el("b", null, dd.day || "")); (dd.meals || []).forEach(m => r.append(el("div", null, String(m)))); c.append(r); });
+        if (Array.isArray(data.shopping) && data.shopping.length) {
+          c.append(el("h3", "save-h3", "Список покупок" + (data.total ? " · ≈ " + fmt(data.total) : "")));
+          const ul = el("ul", "ai-list shop"); data.shopping.forEach(x => ul.append(el("li", null, (x.item || "") + (x.qty ? ", " + x.qty : "") + (x.price ? " — " + fmt(x.price) : "")))); c.append(ul);
+        }
+        if (Array.isArray(data.tips) && data.tips.length) { const ul = el("ul", "ai-list good"); data.tips.forEach(t => ul.append(el("li", null, String(t)))); c.append(ul); }
+      }));
+  }
+
+  /* savings goals */
+  {
+    const goals = LS.json("goals", []);
+    const c = sCard("Цели накоплений", goals.length ? null : "Например, «Отпуск, 3 000 к июню». Приложение посчитает, сколько откладывать в месяц.");
+    goals.forEach(g => {
+      const left = Math.max(0, g.target - (g.saved || 0));
+      const months = Math.max(1, Math.round((new Date(g.date + "-01") - new Date(d.getFullYear(), d.getMonth(), 1)) / (30.44 * 86400000)));
+      const row = el("div", "goal");
+      const top = el("div", "goal-top"); top.append(el("b", null, g.name), el("span", "num", fmt(g.saved || 0) + " из " + fmt(g.target)));
+      const bar = el("div", "lr-bar"); const f = el("div", "lr-fill"); f.style.width = Math.min(100, (g.saved || 0) / g.target * 100) + "%"; bar.append(f);
+      const hint = el("p", "save-sub", left ? "Откладывать ≈ " + fmt(left / months) + " в месяц до " + g.date.split("-").reverse().join(".") : "Цель достигнута!");
+      const acts = el("div", "btns");
+      const addIn = inp("goal-add-" + g.id, "text", ""); addIn.inputMode = "decimal"; addIn.placeholder = "Сумма"; addIn.className = "goal-input";
+      acts.append(addIn, button("Внести", "small primary", () => { const v = r2(addIn.value); if (!v) { toast("Введите сумму"); return; } g.saved = r2((g.saved || 0) + v); LS.set("goals", JSON.stringify(goals)); renderSavings(); }));
+      let armed = false;
+      const del = button("Удалить", "small ghost danger", () => { if (!armed) { armed = true; del.textContent = "Точно?"; setTimeout(() => { armed = false; del.textContent = "Удалить"; }, 3000); return; } LS.set("goals", JSON.stringify(goals.filter(x => x.id !== g.id))); renderSavings(); });
+      acts.append(del);
+      row.append(top, bar, hint, acts); c.append(row);
+    });
+    const form = el("div", "fields");
+    const n = inp("goal-name", "text", ""); n.placeholder = "Отпуск";
+    const t = inp("goal-target", "text", ""); t.inputMode = "decimal"; t.placeholder = "3000";
+    const dt = inp("goal-date", "month", isoDay(new Date(d.getFullYear(), d.getMonth() + 6, 1)).slice(0, 7));
+    form.append(field("Новая цель", n, true), field("Сумма, " + cur(), t), field("К какому месяцу", dt));
+    c.append(form);
+    c.append(button("Добавить цель", "small", () => {
+      const v = r2(t.value); if (!n.value.trim() || !v || !dt.value) { toast("Заполните название, сумму и месяц"); return; }
+      goals.push({ id: store.uid(), name: n.value.trim().slice(0, 40), target: v, date: dt.value, saved: 0 });
+      LS.set("goals", JSON.stringify(goals)); renderSavings();
+    }));
+    box.append(c);
+  }
+
+  /* weekly challenges */
+  {
+    const ch = LS.json("challenge", null);
+    const c = sCard("Челлендж на неделю", "Приложение само следит по вашим тратам и считает, сколько получилось сэкономить.");
+    const P = ch ? challengeProgress(savingsCtx(), A, ch) : null;
+    if (P) {
+      const st = el("div", "challenge " + (P.fails.length ? "failed" : "ok"));
+      st.append(el("b", null, P.def.title), el("span", null, P.done ? "Завершён " + dmy(P.end) : "День " + P.elapsed + " из 7"));
+      c.append(st);
+      c.append(kv(P.fails.length ? "Срывов" : "Срывов нет", P.fails.length ? P.fails.length + " × · " + fmt(P.spent) : "✓"), kv("Сэкономлено по сравнению с обычной неделей", fmt(P.saved), "accent"));
+      c.append(button(P.done ? "Новый челлендж" : "Остановить", "small ghost", () => { LS.set("challenge", null); renderSavings(); }));
+    } else {
+      CHALLENGES.forEach(x => {
+        const r = el("button", "challenge-pick"); r.type = "button";
+        r.append(el("b", null, x.title), el("span", null, x.hint));
+        r.onclick = () => { LS.set("challenge", JSON.stringify({ id: x.id, start: today, at: Date.now() })); renderSavings(); toast("Челлендж начат. Удачи!"); };
+        c.append(r);
+      });
+    }
+    box.append(c);
+  }
+  box.append(el("p", "hint save-foot", "Раздел будет пополняться. Если какой-то совет кажется неверным, напишите, что поправить."));
+}
+
+/** A card whose content comes from Claude on request; the last answer is kept on the phone. */
+function aiCard(key, title, sub, action, notReady, ask, draw) {
+  const c = sCard(title, sub);
+  const saved = LS.json(key, null);
+  const body = el("div"); c.append(body);
+  const paint = data => { body.innerHTML = ""; draw(body, data.data); body.append(el("p", "hint", "Получено " + new Date(data.at).toLocaleDateString("ru-RU"))); };
+  if (saved && saved.data) paint(saved);
+  const reason = notReady();
+  if (reason && !saved) { c.append(el("p", "hint", reason)); return c; }
+  if (!apiKey()) { c.append(el("p", "hint", "Нужен подключённый Claude (Настройки → Распознавание через Claude).")); return c; }
+  const btn = button(saved ? "Обновить" : action, saved ? "small ghost" : "small primary", async () => {
+    btn.disabled = true; const t0 = btn.textContent; btn.textContent = "Claude думает…";
+    try { const data = await ask(); const rec = { at: Date.now(), data }; LS.set(key, JSON.stringify(rec)); paint(rec); btn.textContent = "Обновить"; }
+    catch (e) { toast(e.message || "Не получилось. Попробуйте ещё раз.", 5000); btn.textContent = t0; }
+    btn.disabled = false;
+  });
+  c.append(btn);
+  return c;
 }
 
 /* ---------- monthly report ---------- */
@@ -1414,7 +1644,7 @@ function goBack() {
     if (full) { full.classList.remove("full"); return true; }
     closeSheet(); return true;
   }
-  if (tab !== "spend") { setTab("spend"); window.scrollTo(0, 0); return true; }
+  if (tab !== "spend") { setTab("spend"); return true; }
   const d = new Date();
   if (ym.y !== d.getFullYear() || ym.m !== d.getMonth()) { ym.y = d.getFullYear(); ym.m = d.getMonth(); render(); window.scrollTo(0, 0); return true; }
   return false;

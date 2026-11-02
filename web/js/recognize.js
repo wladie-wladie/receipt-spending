@@ -228,3 +228,20 @@ ${ops.map(o => `#${o.i}: ${String(o.text).replace(/\s+/g, " ").slice(0, 400)}`).
     category: spendCats.includes(x.category) ? x.category : (x.kind === "income" ? "Поступления" : null),
   }));
 }
+
+/* ---------- free-form questions to Claude that expect JSON back ---------- */
+export async function askClaudeJSON(prompt, key, modelId, maxTokens = 4096) {
+  let res;
+  try {
+    res = await fetch(API + "/messages", {
+      method: "POST", headers: headers(key),
+      body: JSON.stringify({ model: modelId, max_tokens: maxTokens, messages: [{ role: "user", content: prompt }] }),
+    });
+  } catch (_) { throw new RecognizeError("network", "Нет связи с Claude. Проверьте интернет."); }
+  let json = null; try { json = await res.json(); } catch (_) {}
+  if (!res.ok) throw apiError(res.status, json);
+  const text = (json && Array.isArray(json.content) ? json.content : []).filter(c => c.type === "text").map(c => c.text).join("\n");
+  const parsed = extractJson(text);
+  if (!parsed) throw new RecognizeError("bad_answer", "Claude ответил непонятно. Попробуйте ещё раз.");
+  return parsed;
+}

@@ -139,3 +139,15 @@ export function onBackButton(handler) {
   const app = plugin("App");
   app.addListener("backButton", () => { if (!handler()) app.exitApp(); });
 }
+
+/** Shows a notification right away (used for budget limits). Silently does nothing without permission. */
+export async function notifyNow(title, body, extra) {
+  if (!notificationsAvailable()) return false;
+  const ln = plugin("LocalNotifications");
+  try {
+    const perm = await ln.checkPermissions();
+    if (perm.display !== "granted") return false;
+    await ln.schedule({ notifications: [{ id: 8000 + Math.floor(Math.random() * 100000), title, body, extra: extra || {}, schedule: { at: new Date(Date.now() + 1000), allowWhileIdle: true } }] });
+    return true;
+  } catch (_) { return false; }
+}
