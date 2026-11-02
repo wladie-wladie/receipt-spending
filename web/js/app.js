@@ -39,7 +39,7 @@ const allCats = () => { const c = customCats().filter(x => !SPEND_CATS.includes(
 function addCustomCat(name) {
   name = String(name || "").trim().replace(/\s+/g, " ").slice(0, 40);
   if (!name) return { error: "Введите название категории" };
-  const exists = [...allCats(), INCOME_CAT].find(c => c.toLowerCase() === name.toLowerCase());
+  const exists = [...allCats(), INCOME_CAT, "Еда"].find(c => c.toLowerCase() === name.toLowerCase());
   if (exists) return { name: exists, existed: true };
   LS.set("customCats", JSON.stringify([...customCats(), name]));
   return { name };
@@ -411,13 +411,11 @@ function renderStats(list) {
     exp.forEach(r => { const c = spendCat(r); byCat[c] = (byCat[c] || 0) + mainAmt(r); });
     // Groceries and eating out share one bar: together they are "food", split by colour.
     const lim = planFor(ym.y, ym.m).cats;
-    const entries = Object.entries(byCat).filter(([k]) => k !== "Продукты" && k !== "Кафе и рестораны").map(([k, v]) => [k, v, null, lim[k] || null]);
-    Object.keys(lim).forEach(k => { if (!byCat[k] && k !== "Продукты" && k !== "Кафе и рестораны" && lim[k] > 0) entries.push([k, 0, null, lim[k]]); });
+    const entries = Object.entries(byCat).filter(([k]) => !FOOD_CATS.includes(k)).map(([k, v]) => [k, v, null, lim[k] || null]);
+    Object.keys(lim).forEach(k => { if (!byCat[k] && k !== FOOD && lim[k] > 0) entries.push([k, 0, null, lim[k]]); });
     const food = [["Продукты", byCat["Продукты"] || 0], ["Кафе и рестораны", byCat["Кафе и рестораны"] || 0]].filter(([, v]) => v > 0.004);
-    if (food.length) {
-      const fl = food.length > 1 ? (lim["Продукты"] && lim["Кафе и рестораны"] ? lim["Продукты"] + lim["Кафе и рестораны"] : null) : (lim[food[0][0]] || null);
-      entries.push([food.length > 1 ? "Еда" : food[0][0], food.reduce((a, [, v]) => a + v, 0), food.length > 1 ? food : null, fl]);
-    }
+    const foodLim = lim[FOOD] || (lim[FOOD_CATS[0]] && lim[FOOD_CATS[1]] ? lim[FOOD_CATS[0]] + lim[FOOD_CATS[1]] : null);
+    if (food.length || foodLim) entries.push([FOOD, food.reduce((a, [, v]) => a + v, 0), food.length > 1 ? food : null, foodLim]);
     bars($("#spendCats"), entries, "Здесь появится разбивка, когда в месяце будут траты.");
     const places = {};
     exp.forEach(r => { const k = bank.normMerchant(rName(r)) || rName(r); const o = places[k] = places[k] || { name: rName(r), sum: 0, count: 0 }; o.sum += mainAmt(r); o.count++; });
@@ -836,11 +834,25 @@ async function openReceipt(id) {
 
 /* ---------- budget ---------- */
 // Plans are kept per month; "default" is copied forward to months without their own plan.
+// Groceries and eating out are budgeted together as "Еда".
+const FOOD = "Еда", FOOD_CATS = ["Продукты", "Кафе и рестораны"];
+const foodTogether = () => LS.get("foodTogether", "1") === "1";
+const budgetCat = c => foodTogether() && FOOD_CATS.includes(c) ? FOOD : c;
 const budgetStore = () => LS.json("budget", { plans: {} });
 const monthKey = (y, m) => y + "-" + pad(m + 1);
 function planFor(y, m) {
   const b = budgetStore(), p = b.plans[monthKey(y, m)] || b.plans.default || null;
   const cats = Object.assign({}, (p && p.cats) || {});
+  if (foodTogether()) FOOD_CATS.forEach(k => { if (k in cats) { cats[FOOD] = (cats[FOOD] || 0) + (Number(cats[k]) || 0); delete cats[k]; } });
+  else if (cats[FOOD] > 0) {
+    // Split a shared food limit by how food spending usually divides (half and half if unknown).
+    const avg = averageByCat(y, m, 3, true) || { cats: {} };
+    const a = avg.cats[FOOD_CATS[0]] || 0, b = avg.cats[FOOD_CATS[1]] || 0, share = a + b ? a / (a + b) : 0.5;
+    const step = v => Math.round(v / 5) * 5;
+    if (!(cats[FOOD_CATS[0]] > 0)) cats[FOOD_CATS[0]] = step(cats[FOOD] * share);
+    if (!(cats[FOOD_CATS[1]] > 0)) cats[FOOD_CATS[1]] = step(cats[FOOD] - cats[FOOD_CATS[0]]);
+    delete cats[FOOD];
+  }
   Object.keys(cats).forEach(k => { if (!(cats[k] > 0)) delete cats[k]; });
   const catSum = Object.values(cats).reduce((a, v) => a + v, 0);
   return { exists: !!p, own: !!b.plans[monthKey(y, m)], income: (p && p.income) || 0, savings: (p && p.savings) || 0, total: (p && p.total) || catSum || 0, cats, catSum };
@@ -851,9 +863,9 @@ function savePlan(y, m, plan, forward) {
   if (forward) b.plans.default = plan;
   LS.set("budget", JSON.stringify(b));
 }
-function spentByCat(list) {
+function spentByCat(list, raw) {
   const o = {};
-  list.filter(r => rKind(r) === "expense" && inMain(r)).forEach(r => { const c = spendCat(r); o[c] = (o[c] || 0) + mainAmt(r); });
+  list.filter(r => rKind(r) === "expense" && inMain(r)).forEach(r => { const c = raw ? spendCat(r) : budgetCat(spendCat(r)); o[c] = (o[c] || 0) + mainAmt(r); });
   return o;
 }
 function budgetState(y, m, list) {
@@ -900,14 +912,14 @@ function renderBudgetCard(list) {
   box.append(card);
 }
 
-function averageByCat(y, m, months) {
+function averageByCat(y, m, months, raw) {
   const sums = {}; let n = 0;
   for (let i = 1; i <= months; i++) {
     const d = new Date(y, m - i, 1), k = monthKey(d.getFullYear(), d.getMonth());
     const list = records.filter(r => rDate(r).slice(0, 7) === k);
     if (!list.some(r => rKind(r) === "expense")) continue;
     n++;
-    const by = spentByCat(list); Object.keys(by).forEach(c => { sums[c] = (sums[c] || 0) + by[c]; });
+    const by = spentByCat(list, raw); Object.keys(by).forEach(c => { sums[c] = (sums[c] || 0) + by[c]; });
     sums.__income = (sums.__income || 0) + list.filter(r => rKind(r) === "income" && inMain(r)).reduce((s, r) => s + mainAmt(r), 0);
   }
   if (!n) return null;
@@ -937,10 +949,18 @@ function openBudget(y, m) {
   sec.append(el("p", "small-print", "Пустое поле — без лимита. Справа потрачено в этом месяце."));
   const rows = el("div", "limit-list");
   const inputs = {};
-  const cats = allCats().filter(c => c !== INCOME_CAT);
+  const together = foodTogether();
+  const seg = el("div", "seg-tabs food-mode");
+  [["1", "Еда одной строкой"], ["0", "Продукты и кафе отдельно"]].forEach(([v, label]) => {
+    const bt = el("button", null, label); bt.type = "button"; bt.setAttribute("aria-pressed", String((together ? "1" : "0") === v));
+    bt.onclick = () => { if ((together ? "1" : "0") === v) return; persist(); LS.set("foodTogether", v); openBudget(y, m); };
+    seg.append(bt);
+  });
+  sec.append(seg);
+  const cats = together ? [FOOD, ...allCats().filter(c => c !== INCOME_CAT && !FOOD_CATS.includes(c))] : allCats().filter(c => c !== INCOME_CAT);
   cats.forEach((c, i) => {
     const row = el("div", "limit-row");
-    const name = el("div", "lr-name"); name.append(el("span", null, c));
+    const name = el("div", "lr-name"); name.append(el("span", null, c === FOOD ? "Еда (продукты и кафе)" : c));
     const sp = spent[c] || 0;
     const info = el("small", null, sp ? "потрачено " + fmt(sp) : "пока 0");
     name.append(info);
@@ -983,6 +1003,12 @@ function openBudget(y, m) {
   }
   updSummary();
 
+  // Keeps what was typed when switching how food is planned.
+  function persist() {
+    const p = current();
+    if (together && p.cats[FOOD] && (plan.cats[FOOD] !== p.cats[FOOD])) { delete p.cats[FOOD_CATS[0]]; delete p.cats[FOOD_CATS[1]]; }
+    savePlan(y, m, { income: p.income, savings: p.savings, total: r2(fTot.value) || 0, cats: p.cats }, false);
+  }
   const fwdWrap = el("label", "check-line"); const fwd = el("input"); fwd.type = "checkbox"; fwd.id = "b-forward"; fwd.checked = true;
   fwdWrap.append(fwd, el("span", null, "Использовать этот план и в следующих месяцах"));
   sh.append(fwdWrap);

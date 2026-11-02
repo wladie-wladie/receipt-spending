@@ -78,8 +78,11 @@ export function buildReport(records, y, m, h) {
   let budget = null;
   const plan = h.budget ? h.budget(y, m) : null;
   if (plan && plan.total > 0) {
-    const over = Object.keys(plan.cats).filter(k => (cats[k] || 0) > plan.cats[k]).map(k => ({ k, by: (cats[k] || 0) - plan.cats[k] })).sort((a, b) => b.by - a.by);
-    const within = Object.keys(plan.cats).filter(k => (cats[k] || 0) <= plan.cats[k]).length;
+    // Budget limits treat groceries and eating out as one "Еда".
+    const merge = "Еда" in plan.cats;
+    const bc = {}; Object.keys(cats).forEach(k => { const b = merge && FOOD.includes(k) ? "Еда" : k; bc[b] = (bc[b] || 0) + cats[k]; });
+    const over = Object.keys(plan.cats).filter(k => (bc[k] || 0) > plan.cats[k]).map(k => ({ k, by: (bc[k] || 0) - plan.cats[k] })).sort((a, b) => b.by - a.by);
+    const within = Object.keys(plan.cats).filter(k => (bc[k] || 0) <= plan.cats[k]).length;
     budget = { limit: plan.total, over, within, limits: Object.keys(plan.cats).length, saved: plan.income && !ongoing ? plan.income - total : null, savingsGoal: plan.savings, ongoing };
   }
 
