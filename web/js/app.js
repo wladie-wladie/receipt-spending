@@ -381,11 +381,22 @@ function bars(container, entries, emptyText) {
   if (!entries.length) { container.append(el("p", "hint", emptyText)); return; }
   const total = entries.reduce((a, [, v]) => a + v, 0);
   const max = Math.max(...entries.map(([, v, , lim]) => Math.max(v, lim || 0)));
+  if (entries.some(e => e[3])) {
+    const lg = el("div", "bars-legend");
+    const a = el("span"); a.append(el("i", "lg-fill"), "потрачено");
+    const b = el("span"); b.append(el("i", "lg-limit"), "лимит");
+    const c = el("span"); c.append(el("i", "lg-over"), "сверх лимита");
+    lg.append(a, b, c); container.append(lg);
+  }
   entries.forEach(([k, v, parts, limit]) => {
-    const row = el("div", "bar" + (limit && v > limit ? " over" : ""));
-    const r = el("span", "num", fmt(v)); r.append(el("span", "pct", limit ? "из " + money(limit) : Math.round(v / total * 100) + "%"));
+    const over = limit && v > limit;
+    const row = el("div", "bar" + (over ? " over" : ""));
+    const r = el("span", "num", fmt(v)); r.append(el("span", "pct", limit ? "из " + money(limit) : Math.round(v / total * 100) + "% трат"));
     const tr = el("div", "track");
-    if (limit) { const mk = el("i", "limit"); mk.style.left = Math.min(100, limit / max * 100) + "%"; mk.title = "Лимит " + fmt(limit); tr.append(mk); }
+    if (limit) {
+      const mk = el("i", "limit"); mk.style.left = Math.min(100, limit / max * 100) + "%"; mk.title = "Лимит " + fmt(limit); tr.append(mk);
+      if (over) { const o = el("i", "overrun"); o.style.left = (limit / max * 100) + "%"; o.style.width = ((v - limit) / max * 100) + "%"; tr.append(o); }
+    }
     if (parts && parts.length > 1) {
       tr.classList.add("stacked");
       const legend = el("div", "bar-legend");
@@ -393,13 +404,21 @@ function bars(container, entries, emptyText) {
         const f = el("div", "fill part" + i); f.style.width = (pv / max * 100) + "%"; f.title = name + ": " + fmt(pv); tr.append(f);
         const li = el("span", "lg"); li.append(el("i", "dot part" + i), name + " " + fmt(pv)); legend.append(li);
       });
-      row.append(el("span", null, k), r, tr, legend);
-    } else {
-      const f = el("div", "fill"); f.style.width = (v > 0.004 ? Math.max(2, v / max * 100) : 0) + "%"; tr.append(f);
       row.append(el("span", null, k), r, tr);
+      if (limit) row.append(limitNote(v, limit));
+      row.append(legend);
+    } else {
+      const f = el("div", "fill"); f.style.width = (v > 0.004 ? Math.max(2, Math.min(v, limit || v) / max * 100) : 0) + "%"; tr.append(f);
+      row.append(el("span", null, k), r, tr);
+      if (limit) row.append(limitNote(v, limit));
     }
     container.append(row);
   });
+}
+function limitNote(v, limit) {
+  const pct = Math.round(v / limit * 100);
+  const full = v <= limit && limit - v < Math.max(0.5, limit * 0.005);
+  return el("div", "limit-note" + (v > limit && !full ? " over" : ""), full ? "лимит использован полностью" : v > limit ? "сверх лимита на " + fmt(v - limit) + " (" + pct + "%)" : "осталось " + fmt(limit - v) + " · использовано " + pct + "%");
 }
 function renderStats(list) {
   $("#st-all").setAttribute("aria-pressed", String(statsView === "all"));
@@ -464,6 +483,7 @@ $("#tab-spend").onclick = () => setTab("spend");
 $("#tab-stats").onclick = () => setTab("stats");
 $("#st-all").onclick = () => { statsView = "all"; render(); };
 $("#openReport").onclick = () => openReport(ym.y, ym.m);
+$("#helpBars").onclick = explainBars;
 $("#st-food").onclick = () => { statsView = "food"; render(); };
 $("#prev").onclick = () => { ym.m--; if (ym.m < 0) { ym.m = 11; ym.y--; } render(); };
 $("#next").onclick = () => { ym.m++; if (ym.m > 11) { ym.m = 0; ym.y++; } render(); };
@@ -923,7 +943,8 @@ function budgetState(y, m, list) {
 function renderBudgetCard(list) {
   const box = $("#budgetCard"); box.innerHTML = "";
   const S = budgetState(ym.y, ym.m, list);
-  const card = el("button", "budget-card"); card.type = "button"; card.onclick = () => openBudget(ym.y, ym.m);
+  const card = el("div", "budget-card"); card.setAttribute("role", "button"); card.tabIndex = 0; card.onclick = () => openBudget(ym.y, ym.m);
+  card.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openBudget(ym.y, ym.m); } };
   if (!S.plan.total) {
     card.classList.add("empty-budget");
     card.append(el("b", null, "Спланировать бюджет на " + monthName(ym.m).toLowerCase()), el("span", null, "Лимиты по категориям, доход и сколько отложить. Можно заполнить по прошлым месяцам."));
@@ -936,20 +957,68 @@ function renderBudgetCard(list) {
   const state = S.left < 0 ? "over" : D && D.flexSpent > D.flexBudget * (new Date().getDate() / new Date(ym.y, ym.m + 1, 0).getDate()) * 1.05 + 1 ? "fast" : "ok";
   card.classList.add("st-" + state);
   const top = el("div", "bc-top");
-  top.append(el("span", "label", "Бюджет на месяц"), el("span", "num", fmt(S.spent) + " из " + fmt(S.plan.total)));
+  const help = el("button", "help-btn", "?"); help.type = "button"; help.setAttribute("aria-label", "Что показывает полоска");
+  help.onclick = e => { e.stopPropagation(); explainBudget(S, D); };
+  const ttl = el("span", "label", "Бюджет на месяц");
+  top.append(ttl, el("span", "num", fmt(S.spent) + " из " + fmt(S.plan.total)), help);
+  // Status in words first, so the colour is never the only signal.
+  const status = el("div", "bc-status");
+  const ahead = D ? D.flexSpent - D.flexBudget * (new Date().getDate() / new Date(ym.y, ym.m + 1, 0).getDate()) : 0;
+  if (state === "over") status.append(el("b", null, "Перерасход " + fmt(-S.left)));
+  else if (state === "fast") status.append(el("b", null, "Опережаете план на " + fmt(ahead)));
+  else status.append(el("b", null, S.isCur ? "В пределах плана" : "Уложились"));
+  const barWrap = el("div", "bc-barwrap");
   const bar = el("div", "bc-bar"); const f = el("div", "bc-fill"); f.style.width = Math.min(100, pct * 100) + "%"; bar.append(f);
-  if (S.isCur) { const pace = el("i", "bc-pace"); pace.style.left = Math.min(100, S.expectedNow / S.plan.total * 100) + "%"; pace.title = "Столько по плану к сегодняшнему дню"; bar.append(pace); }
+  if (S.isCur) {
+    const at = Math.min(100, S.expectedNow / S.plan.total * 100);
+    const pace = el("i", "bc-pace"); pace.style.left = at + "%"; bar.append(pace);
+    const flag = el("span", "bc-flag", "план на сегодня " + fmt(S.expectedNow));
+    flag.style.left = at + "%"; flag.classList.add(at > 60 ? "to-left" : at < 25 ? "to-right" : "centered");
+    barWrap.append(flag);
+  }
+  barWrap.append(bar);
+  const legend = el("div", "bc-legend");
+  const l1 = el("span"); l1.append(el("i", "lg-fill"), "потрачено " + fmt(S.spent));
+  legend.append(l1);
+  if (S.isCur) { const l2 = el("span"); l2.append(el("i", "lg-limit"), "план к сегодняшнему дню"); legend.append(l2); }
   const line = el("div", "bc-line");
-  if (S.left < 0) line.append(el("b", null, "Перерасход " + fmt(-S.left)));
-  else if (S.isCur) { line.append(el("b", null, "Осталось " + fmt(S.left)), " · на повседневное " + fmt(D ? D.perDay : S.perDay) + " в день"); }
-  else line.append(el("b", null, "Осталось " + fmt(S.left)));
-  if (state === "fast") line.append(el("span", "bc-warn", " · повседневные траты идут быстрее плана"));
-  card.append(top, bar, line);
+  if (S.left >= 0) line.append("Осталось " + fmt(S.left));
+  if (S.isCur && S.left >= 0) line.append(" · на повседневное " + fmt(D ? D.perDay : S.perDay) + " в день");
+  card.append(top, status, barWrap, legend, line);
   const notes = [];
   S.over.slice(0, 2).forEach(o => notes.push("«" + o.k + "» сверх лимита на " + fmt(o.by)));
   if (notes.length < 2) S.near.slice(0, 2 - notes.length).forEach(o => notes.push("«" + o.k + "»: осталось " + fmt(o.left)));
   if (notes.length) card.append(el("div", "bc-notes", notes.join(" · ")));
   box.append(card);
+}
+
+function explainBudget(S, D) {
+  const sh = sheetStart("Как читать полоску бюджета", "help");
+  const demo = el("div", "budget-card st-ok demo");
+  const bar = el("div", "bc-bar"); const f = el("div", "bc-fill"); f.style.width = "55%"; bar.append(f);
+  const p = el("i", "bc-pace"); p.style.left = "45%"; bar.append(p); demo.append(bar);
+  sh.append(demo);
+  const ul = el("ul", "help-list");
+  const li = (strong, text) => { const x = el("li"); x.append(el("b", null, strong), " — " + text); ul.append(x); };
+  li("Заливка", "сколько уже потрачено из бюджета месяца. Сейчас " + fmt(S.spent) + " из " + fmt(S.plan.total) + ".");
+  if (S.isCur) li("Тонкая черта", "сколько по плану должно быть потрачено к сегодняшнему дню" + (D ? ": обязательные платежи по факту и повседневные равномерно по дням. Сейчас это " + fmt(S.expectedNow) + "." : "."));
+  li("Заливка левее черты", "тратите медленнее плана, всё хорошо.");
+  li("Заливка правее черты", "повседневные траты опережают план, карточка становится жёлтой.");
+  li("Красная заливка", "бюджет месяца уже превышен.");
+  sh.append(ul);
+  sh.append(el("p", "small-print", "Нажмите на карточку, чтобы открыть планер и поменять лимиты."));
+}
+function explainBars() {
+  const sh = sheetStart("Как читать полосы категорий", "help");
+  const ul = el("ul", "help-list");
+  const li = (strong, text) => { const x = el("li"); x.append(el("b", null, strong), " — " + text); ul.append(x); };
+  li("Длина полосы", "сколько потрачено в категории за месяц. Самая длинная — самая затратная категория.");
+  li("Тонкая черта", "лимит категории из планера бюджета. Справа написано «потрачено из лимита», под полосой — сколько осталось.");
+  li("Красная часть", "сколько потрачено сверх лимита.");
+  li("Процент справа", "у категорий без лимита: доля от всех трат месяца.");
+  li("Два цвета в «Еде»", "продукты и кафе с рестораном; суммы подписаны под полосой.");
+  sh.append(ul);
+  sh.append(el("p", "small-print", "Лимиты задаются во вкладке «Бюджет»."));
 }
 
 function averageByCat(y, m, months, raw) {
@@ -1006,7 +1075,10 @@ function openBudget(y, m) {
     name.append(info);
     const li = moneyInp("lim-" + i, plan.cats[c]); li.setAttribute("aria-label", "Лимит: " + c);
     const mini = el("div", "lr-bar"); const mf = el("div", "lr-fill"); mini.append(mf);
-    const upd = () => { const v = num(li.value); mf.style.width = v ? Math.min(100, sp / v * 100) + "%" : "0"; row.classList.toggle("over", !!v && sp > v); };
+    const upd = () => {
+      const v = num(li.value); mf.style.width = v ? Math.min(100, sp / v * 100) + "%" : "0"; row.classList.toggle("over", !!v && sp > v);
+      info.textContent = (sp ? "потрачено " + fmt(sp) : "пока 0") + (v ? (sp > v ? " · сверх лимита на " + fmt(sp - v) : " · " + Math.round(sp / v * 100) + "% лимита") : "");
+    };
     li.oninput = () => { upd(); updSummary(); };
     upd();
     inputs[c] = li;
