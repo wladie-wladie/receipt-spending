@@ -346,3 +346,7 @@ a{color:var(--accent)}
 .help-list{margin:12px 0 0;padding-left:18px;font-size:14px}
 .help-list li{margin:8px 0}
 .budget-card.demo{cursor:default;margin-top:14px}
+.row.skip .rname,.row.skip .ramt{color:var(--muted)}
+.row.skip .ramt{text-decoration:line-through;text-decoration-thickness:1px}
+.row.skip .thumb{opacity:.55}
+.chip-btn.skip-chip{border-style:dashed;color:var(--muted)}

@@ -122,9 +122,15 @@ function toast(msg, ms = 3400) { const t = $("#toast"); t.textContent = msg; t.h
 
 /* ---------- record helpers ---------- */
 const ITEM_TO_SPEND = { "Кафе и доставка": "Кафе и рестораны", "Бытовая химия": "Дом", "Гигиена и аптека": "Здоровье", "Другое": null };
-const rKind = r => r.kind === "income" ? "income" : "expense";
+// "skip" = the person marked it "не учитывать в бюджете": it stays in the list but is left out of every total.
+const rKind = r => r.excluded ? "skip" : r.kind === "income" ? "income" : "expense";
+const isIn = r => r.kind === "income";
+const SKIP = "__skip__";
+const TYPE_OPTIONS = [["expense", "Расход"], ["income", "Поступление"], ["expense-skip", "Расход — не учитывать в бюджете"], ["income-skip", "Поступление — не учитывать в бюджете"]];
+const typeOf = r => (isIn(r) ? "income" : "expense") + (r.excluded ? "-skip" : "");
+const parseType = v => ({ kind: v.startsWith("income") ? "income" : "expense", excluded: v.endsWith("-skip") });
 function spendCat(r) {
-  if (rKind(r) === "income") return INCOME_CAT;
+  if (isIn(r)) return INCOME_CAT;
   if (r.category && allCats().includes(r.category)) return r.category;
   const its = r.items || [];
   if (its.length) {
@@ -316,7 +322,7 @@ function renderInbox(box) {
     t.append(el("div", "rname", rName(r)));
     const when = new Date(r.createdAt);
     t.append(el("div", "rsub", (r.bankApp || "Банк") + " · " + (rDate(r) === isoDay(new Date()) ? "" : dayLabel(rDate(r)) + ", ") + hhmm(when)));
-    top.append(t, el("div", "ramt" + (rKind(r) === "income" ? " income" : ""), (rKind(r) === "income" ? "+" : "") + amountLabel(r)));
+    top.append(t, el("div", "ramt" + (isIn(r) ? " income" : ""), (isIn(r) ? "+" : "") + amountLabel(r)));
     const chips = el("div", "chips");
     const opts = [];
     if (r.category) opts.push(r.category);
@@ -327,15 +333,24 @@ function renderInbox(box) {
       chips.append(ch);
     });
     const more = el("button", "chip-btn", "Другая…"); more.type = "button"; more.onclick = () => openReceipt(r.id);
-    chips.append(more);
+    const skip = el("button", "chip-btn skip-chip", "Не учитывать"); skip.type = "button"; skip.title = "Не учитывать в бюджете (например, перевод между своими счетами)"; skip.onclick = () => skipOp(r);
+    chips.append(more, skip);
     row.append(top, chips); card.append(row);
   });
   if (inbox.length > 20) card.append(el("p", "hint", "И ещё " + (inbox.length - 20) + ". Подтвердите эти, и появятся следующие."));
   box.append(card);
 }
 
+async function skipOp(r) {
+  await store.updateReceipt(r.id, { excluded: true, review: "done" });
+  learnRule(rName(r), SKIP);
+  const k = bank.normMerchant(rName(r));
+  for (const o of records) if (o.id !== r.id && isInbox(o) && k && bank.normMerchant(rName(o)) === k) await store.updateReceipt(o.id, { excluded: true, review: "done" });
+  toast(rName(r) + ": не учитывается в бюджете. Так будет и с будущими операциями отсюда.", 4500);
+  reload();
+}
 async function confirmOp(r, cat) {
-  await store.updateReceipt(r.id, { category: cat, review: "done" });
+  await store.updateReceipt(r.id, { category: cat, review: "done", excluded: false });
   learnRule(rName(r), cat);
   // Same place waiting in the inbox: apply the choice to it too.
   const k = bank.normMerchant(rName(r));
@@ -352,7 +367,8 @@ async function confirmAll() {
 function rowEl(r) {
   const b = el("button", "row"); b.type = "button"; b.onclick = () => openReceipt(r.id);
   const cat = spendCat(r);
-  const ph = el("div", "thumb" + (rKind(r) === "income" ? " income" : ""), r.photo ? "" : (CAT_SHORT[cat] || "₽"));
+  if (r.excluded) b.classList.add("skip");
+  const ph = el("div", "thumb" + (isIn(r) ? " income" : ""), r.photo ? "" : (CAT_SHORT[cat] || "₽"));
   b.append(ph);
   if (r.photo) photoUrl(r.photo).then(u => { if (u) { const im = el("img", "thumb"); im.src = u; im.alt = ""; ph.replaceWith(im); } });
   const m = el("div", "rmain");
@@ -361,15 +377,15 @@ function rowEl(r) {
   if (r.status === "parsing" && !isStuck(r)) { const c = el("span", "chip"); c.append(el("span", "spin"), "Распознаю"); sub.append(c, " "); }
   else if (needsParse(r)) sub.append(el("span", "chip", "Ждёт разбора"), " ");
   if (isInbox(r)) sub.append(el("span", "chip", "Новая"), " ");
-  const bits = [cat];
+  const bits = r.excluded ? ["не в бюджете", cat] : [cat];
   const it = r.items || [];
   if (it.length) bits.push(it.length + " " + plural(it.length, "позиция", "позиции", "позиций"));
   if (r.source === "bank") bits.push(r.photo ? "банк + чек" : "банк");
   if (isForeign(r)) bits.push(fmt(rTotal(r), rCur(r)));
   sub.append(bits.join(" · "));
   m.append(sub); b.append(m);
-  const amt = r.status === "parsing" && r.total == null ? "…" : (rKind(r) === "income" ? "+" : "") + amountLabel(r);
-  b.append(el("div", "ramt" + (rKind(r) === "income" ? " income" : ""), amt));
+  const amt = r.status === "parsing" && r.total == null ? "…" : (isIn(r) ? "+" : "") + amountLabel(r);
+  b.append(el("div", "ramt" + (isIn(r) ? " income" : ""), amt));
   return b;
 }
 
@@ -630,7 +646,10 @@ async function importBank() {
       if (await store.getReceipt(id)) continue;
       const when = new Date(Number(n.time) || Date.now());
       const sug = p.kind === "income" ? { cat: INCOME_CAT, sure: true } : suggestCategory(p.merchant, p.transfer);
+      const skipIt = sug.cat === SKIP;
+      if (skipIt) sug.cat = null;
       const rec = {
+        excluded: skipIt,
         id, source: "bank", kind: p.kind, createdAt: when.toISOString(), updatedAt: new Date().toISOString(),
         date: isoDay(when), time: hhmm(when), total: p.amount, currency: p.currency || currencyCode(),
         merchant: bank.prettyMerchant(p.merchant), store: "", bankApp: n.app || "", bankPkg: n.pkg || "", raw: [n.title, n.text].filter(Boolean).join("\n"),
@@ -670,8 +689,8 @@ async function classifyNew() {
       if (x.kind === "income") { patch.kind = "income"; patch.category = INCOME_CAT; patch.review = "done"; }
       else if (x.category) {
         const learned = suggestCategory(x.merchant || r.merchant);
-        patch.category = learned.sure ? learned.cat : x.category;
-        if (learned.sure) patch.review = "done";
+        if (learned.sure && learned.cat === SKIP) { patch.excluded = true; patch.review = "done"; }
+        else { patch.category = learned.sure ? learned.cat : x.category; if (learned.sure) patch.review = "done"; }
       }
       await store.updateReceipt(r.id, patch);
     }
@@ -769,11 +788,11 @@ async function openReceipt(id) {
   const fStore = inp("e-store", "text", r.store || r.merchant || "");
   const fDate = inp("e-date", "date", rDate(r));
   const fTotal = inp("e-total", "text", r.total != null ? String(r.total) : ""); fTotal.inputMode = "decimal";
-  const fKind = select("e-kind", [["expense", "Расход"], ["income", "Поступление"]], rKind(r));
-  const catOptions = () => fKind.value === "income" ? [INCOME_CAT] : catChoices();
-  let fCat = catSelect("e-cat", catOptions(), rKind(r) === "income" ? INCOME_CAT : spendCat(r));
+  const fKind = select("e-kind", TYPE_OPTIONS, typeOf(r));
+  const catOptions = () => parseType(fKind.value).kind === "income" ? [INCOME_CAT] : catChoices();
+  let fCat = catSelect("e-cat", catOptions(), isIn(r) ? INCOME_CAT : spendCat(r));
   const catField = field("Категория", fCat, true);
-  fKind.onchange = () => { const n = catSelect("e-cat", catOptions(), fKind.value === "income" ? INCOME_CAT : spendCat(r)); fCat.replaceWith(n); fCat = n; };
+  fKind.onchange = () => { const n = catSelect("e-cat", catOptions(), parseType(fKind.value).kind === "income" ? INCOME_CAT : spendCat(r)); fCat.replaceWith(n); fCat = n; };
   const fCur = select("e-cur", currencyOptions(), rCur(r));
   fs.append(field("Место или получатель", fStore, true), field("Сумма", fTotal), field("Валюта", fCur), field("Дата", fDate), catField, field("Тип", fKind, true));
   sh.append(fs);
@@ -834,14 +853,16 @@ async function openReceipt(id) {
       return it;
     });
     const name = fStore.value.trim();
-    const patch = { date: fDate.value || rDate(r), total: fTotal.value.trim() === "" ? null : r2(fTotal.value), kind: fKind.value, category: fCat.value, currency: fCur.value };
+    const patch = { date: fDate.value || rDate(r), total: fTotal.value.trim() === "" ? null : r2(fTotal.value), kind: parseType(fKind.value).kind, excluded: parseType(fKind.value).excluded, category: fCat.value, currency: fCur.value };
     if (r.source === "bank") patch.merchant = name; else patch.store = name;
     if (showItems) patch.items = clean;
     if (!busy && clean.length && r.photo) patch.status = "parsed";
     if (r.source === "bank") patch.review = "done";
     try {
       await store.updateReceipt(r.id, patch);
-      if (fKind.value === "expense" && name && (r.source === "bank" || fCat.value !== spendCat(r))) learnRule(name, fCat.value);
+      const ty = parseType(fKind.value);
+      if (ty.excluded && name && r.source === "bank") learnRule(name, SKIP);
+      else if (ty.kind === "expense" && name && (r.source === "bank" || fCat.value !== spendCat(r))) learnRule(name, fCat.value);
       toast(isInbox(r) ? "Подтверждено" : "Сохранено"); closeSheet(); reload();
     } catch (_) { toast("Не удалось сохранить."); save.disabled = false; }
   });
@@ -1465,8 +1486,8 @@ $("#addManual").onclick = () => {
   const fCat = catSelect("m-cat", catChoices(), "Кафе и рестораны");
   const fStore = inp("m-store", "text", ""); fStore.placeholder = "Кафе, рынок, такси, кому перевели";
   const fDate = inp("m-date", "date", isoDay(new Date()));
-  const fKind = select("m-kind", [["expense", "Расход"], ["income", "Поступление"]], "expense");
-  fKind.onchange = () => { fCat.disabled = fKind.value === "income"; };
+  const fKind = select("m-kind", TYPE_OPTIONS, "expense");
+  fKind.onchange = () => { fCat.disabled = parseType(fKind.value).kind === "income"; };
   const fCur = select("m-cur", currencyOptions(), currencyCode());
   fs.append(field("Сумма", fSum), field("Валюта", fCur), field("Дата", fDate), field("Тип", fKind), field("Категория", fCat, true), field("Где или что", fStore, true));
   sh.append(fs);
@@ -1475,10 +1496,10 @@ $("#addManual").onclick = () => {
     const s = r2(fSum.value); if (!s) { toast("Укажите сумму"); fSum.focus(); return; }
     save.disabled = true;
     const nowIso = new Date().toISOString();
-    const income = fKind.value === "income";
+    const ty = parseType(fKind.value), income = ty.kind === "income";
     await store.putReceipt({ id: store.uid(), createdAt: nowIso, updatedAt: nowIso, date: fDate.value || isoDay(new Date()), photo: null, status: "manual", source: "manual",
-      kind: income ? "income" : "expense", category: income ? INCOME_CAT : fCat.value, store: fStore.value.trim(), total: s, currency: fCur.value, items: [] });
-    if (!income && fStore.value.trim()) learnRule(fStore.value.trim(), fCat.value);
+      kind: ty.kind, excluded: ty.excluded, category: income ? INCOME_CAT : fCat.value, store: fStore.value.trim(), total: s, currency: fCur.value, items: [] });
+    if (!income && !ty.excluded && fStore.value.trim()) learnRule(fStore.value.trim(), fCat.value);
     toast("Добавлено"); closeSheet(); reload();
   });
   b.append(save); sh.append(b);
