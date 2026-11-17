@@ -836,32 +836,27 @@ async function openReceipt(id) {
   const showItems = !!(items.length || r.photo);
   if (showItems) { drawItems(); sh.append(paper); }
 
-  /* reconciling sums: one adjustment line makes the items add up to the amount that counts */
+  /* reconciling sums: "Скорректировать" makes the amount equal to the receipt and saves right away */
   let reconciled = false;
-  const withBank = r.source === "bank";
-  const ADJ_UP = withBank ? "Разница с банком (сервис, чаевые, округление)" : "Разница с итогом (не распознано, округление)";
-  const ADJ_DOWN = withBank ? "Скидка / разница с банком" : "Скидка / разница с итогом";
-  function adjustTo(target) {
-    for (let i = items.length - 1; i >= 0; i--) if (items[i].adj) items.splice(i, 1);
-    const diff = r2(target - items.reduce((a, i) => a + num(i.price), 0));
-    if (Math.abs(diff) >= 0.01) items.push({ name: diff > 0 ? ADJ_UP : ADJ_DOWN, orig: "", qty: 1, price: diff, category: "Другое", adj: true });
-    reconciled = true;
-    drawItems(); syncFix();
-  }
+  const sumItems = () => r2(items.reduce((a, i) => a + num(i.price), 0));
+  function setTotal(v) { fTotal.value = String(r2(v)); reconciled = true; updSum(); syncFix(); save.click(); }
   if (r.source === "bank" && r.receiptTotal && Math.abs(num(r.receiptTotal) - rTotal(r)) > 0.05) {
     const n = el("div", "note mismatch-note");
     n.append(el("div", null, "Сумма в чеке (" + fmt(r.receiptTotal, rCur(r)) + ") отличается от суммы в банке (" + fmt(rTotal(r), rCur(r)) + ")."));
     const bb = el("div", "btns");
-    bb.append(button("Скорректировать", "small primary", () => { adjustTo(rTotal(r)); save.click(); }),
-      button("Взять сумму из чека", "small ghost", () => { fTotal.value = String(r.receiptTotal); adjustTo(num(r.receiptTotal)); save.click(); }));
-    n.append(bb, el("div", "small-print", "«Скорректировать» оставит сумму банка и добавит в чек строку с разницей. «Взять сумму из чека» — если банк списал не ту сумму или в другой валюте."));
+    bb.append(button("Скорректировать", "small primary", () => setTotal(num(r.receiptTotal))));
+    n.append(bb);
     mismatchBox.append(n);
   }
-  // Items vs total on any receipt: a small button right under the sum line.
+  // Items vs total on any receipt: the same one-tap fix right under the receipt.
   const fixRow = el("div", "fix-row");
-  const fixBtn = button("Скорректировать до итога", "small ghost", () => { adjustTo(num(fTotal.value)); toast("Добавлена строка с разницей. Нажмите «Сохранить»."); });
-  fixRow.append(fixBtn);
-  const syncFix = () => { const t = num(fTotal.value), sum = items.reduce((a, i) => a + num(i.price), 0); fixRow.hidden = !(showItems && items.length && t > 0 && Math.abs(t - sum) > 0.05); };
+  const fixNote = el("span", "small-print");
+  fixRow.append(fixNote, button("Скорректировать", "small ghost", () => setTotal(sumItems())));
+  const syncFix = () => {
+    const t = num(fTotal.value), sum = sumItems();
+    fixRow.hidden = !(showItems && items.length && t > 0 && Math.abs(t - sum) > 0.05);
+    fixNote.textContent = "Сумма чека " + fmt(sum, rCur(r)) + " — сделать её итогом?";
+  };
   if (showItems) { sh.append(fixRow); syncFix(); const prevUpd = fTotal.oninput; fTotal.oninput = () => { prevUpd(); syncFix(); }; paper.addEventListener("input", syncFix); paper.addEventListener("click", () => setTimeout(syncFix)); }
 
   const b1 = el("div", "btns");

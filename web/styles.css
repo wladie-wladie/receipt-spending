@@ -352,4 +352,6 @@ a{color:var(--accent)}
 .chip-btn.skip-chip{border-style:dashed;color:var(--muted)}
 .mismatch-note .btns{margin-top:8px}
 .mismatch-note .small-print{color:inherit;opacity:.85;margin-top:6px}
-.fix-row{margin-top:8px}
+.fix-row{margin-top:8px;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.fix-row[hidden]{display:none}
+.fix-row .btn{margin:0}
